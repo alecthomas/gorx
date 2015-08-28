@@ -299,9 +299,20 @@ func (f GenericObservableFilterFactory) {{$name}}(parent {{$name}}Observable) {{
 	})
 }
 
-type Observable{{$name}}Complete struct {}
+type Never{{$name}}Observable struct {}
 
-func (o *Observable{{$name}}Complete) Subscribe(observer {{$name}}Observer) Subscription {
+func (o *Never{{$name}}Observable) Subscribe(observer {{$name}}Observer) Subscription {
+	subscription := new(GenericSubscription)
+	return subscription
+}
+
+func Never{{$name}}() *{{$name}}Stream {
+	return From{{$name}}Observable(&Never{{$name}}Observable{})
+}
+
+type Empty{{$name}}Observable struct {}
+
+func (o *Empty{{$name}}Observable) Subscribe(observer {{$name}}Observer) Subscription {
 	subscription := new(GenericSubscription)
 	go func() {
 		observer.Complete()
@@ -310,8 +321,8 @@ func (o *Observable{{$name}}Complete) Subscribe(observer {{$name}}Observer) Subs
 	return subscription
 }
 
-func From{{$name}}Complete() *{{$name}}Stream {
-	return From{{$name}}Observable(&Observable{{$name}}Complete{})
+func Empty{{$name}}() *{{$name}}Stream {
+	return From{{$name}}Observable(&Empty{{$name}}Observable{})
 }
 
 type Observable{{$name}}Error struct {
@@ -331,7 +342,7 @@ func (o *Observable{{$name}}Error) Subscribe(observer {{$name}}Observer) Subscri
 	return subscription
 }
 
-func From{{$name}}Error(err error) *{{$name}}Stream {
+func Throw{{$name}}(err error) *{{$name}}Stream {
 	return From{{$name}}Observable(&Observable{{$name}}Error{ err })
 }
 

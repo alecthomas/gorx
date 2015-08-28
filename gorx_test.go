@@ -143,16 +143,26 @@ func TestDo(t *testing.T) {
 	assert.Equal(t, b, a)
 }
 
+func TestThrow(t *testing.T) {
+	_, err := ThrowInt(errors.New("error")).ToArrayWithError()
+	assert.Error(t, err)
+}
+
+func TestEmpty(t *testing.T) {
+	a, err := EmptyInt().ToArrayWithError()
+	assert.NoError(t, err)
+	assert.Equal(t, []int{}, a)
+}
+
 func TestDoOnError(t *testing.T) {
 	var oerr error
-	_, err := FromIntError(errors.New("dead")).DoOnError(func(err error) { oerr = err }).ToArrayWithError()
-	assert.Error(t, err)
+	_, err := ThrowInt(errors.New("error")).DoOnError(func(err error) { oerr = err }).ToArrayWithError()
 	assert.Equal(t, err, oerr)
 }
 
 func TestDoOnComplete(t *testing.T) {
 	complete := false
-	a, err := FromIntComplete().DoOnComplete(func() { complete = true }).ToArrayWithError()
+	a, err := EmptyInt().DoOnComplete(func() { complete = true }).ToArrayWithError()
 	assert.NoError(t, err)
 	assert.Equal(t, []int{}, a)
 	assert.True(t, complete)

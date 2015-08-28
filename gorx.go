@@ -272,9 +272,20 @@ func (f GenericObservableFilterFactory) Int(parent IntObservable) IntObservable 
 	})
 }
 
-type ObservableIntComplete struct {}
+type NeverIntObservable struct {}
 
-func (o *ObservableIntComplete) Subscribe(observer IntObserver) Subscription {
+func (o *NeverIntObservable) Subscribe(observer IntObserver) Subscription {
+	subscription := new(GenericSubscription)
+	return subscription
+}
+
+func NeverInt() *IntStream {
+	return FromIntObservable(&NeverIntObservable{})
+}
+
+type EmptyIntObservable struct {}
+
+func (o *EmptyIntObservable) Subscribe(observer IntObserver) Subscription {
 	subscription := new(GenericSubscription)
 	go func() {
 		observer.Complete()
@@ -283,8 +294,8 @@ func (o *ObservableIntComplete) Subscribe(observer IntObserver) Subscription {
 	return subscription
 }
 
-func FromIntComplete() *IntStream {
-	return FromIntObservable(&ObservableIntComplete{})
+func EmptyInt() *IntStream {
+	return FromIntObservable(&EmptyIntObservable{})
 }
 
 type ObservableIntError struct {
@@ -304,7 +315,7 @@ func (o *ObservableIntError) Subscribe(observer IntObserver) Subscription {
 	return subscription
 }
 
-func FromIntError(err error) *IntStream {
+func ThrowInt(err error) *IntStream {
 	return FromIntObservable(&ObservableIntError{ err })
 }
 
@@ -809,9 +820,20 @@ func (f GenericObservableFilterFactory) String(parent StringObservable) StringOb
 	})
 }
 
-type ObservableStringComplete struct {}
+type NeverStringObservable struct {}
 
-func (o *ObservableStringComplete) Subscribe(observer StringObserver) Subscription {
+func (o *NeverStringObservable) Subscribe(observer StringObserver) Subscription {
+	subscription := new(GenericSubscription)
+	return subscription
+}
+
+func NeverString() *StringStream {
+	return FromStringObservable(&NeverStringObservable{})
+}
+
+type EmptyStringObservable struct {}
+
+func (o *EmptyStringObservable) Subscribe(observer StringObserver) Subscription {
 	subscription := new(GenericSubscription)
 	go func() {
 		observer.Complete()
@@ -820,8 +842,8 @@ func (o *ObservableStringComplete) Subscribe(observer StringObserver) Subscripti
 	return subscription
 }
 
-func FromStringComplete() *StringStream {
-	return FromStringObservable(&ObservableStringComplete{})
+func EmptyString() *StringStream {
+	return FromStringObservable(&EmptyStringObservable{})
 }
 
 type ObservableStringError struct {
@@ -841,7 +863,7 @@ func (o *ObservableStringError) Subscribe(observer StringObserver) Subscription 
 	return subscription
 }
 
-func FromStringError(err error) *StringStream {
+func ThrowString(err error) *StringStream {
 	return FromStringObservable(&ObservableStringError{ err })
 }
 
@@ -1249,9 +1271,20 @@ func (f GenericObservableFilterFactory) Float32(parent Float32Observable) Float3
 	})
 }
 
-type ObservableFloat32Complete struct {}
+type NeverFloat32Observable struct {}
 
-func (o *ObservableFloat32Complete) Subscribe(observer Float32Observer) Subscription {
+func (o *NeverFloat32Observable) Subscribe(observer Float32Observer) Subscription {
+	subscription := new(GenericSubscription)
+	return subscription
+}
+
+func NeverFloat32() *Float32Stream {
+	return FromFloat32Observable(&NeverFloat32Observable{})
+}
+
+type EmptyFloat32Observable struct {}
+
+func (o *EmptyFloat32Observable) Subscribe(observer Float32Observer) Subscription {
 	subscription := new(GenericSubscription)
 	go func() {
 		observer.Complete()
@@ -1260,8 +1293,8 @@ func (o *ObservableFloat32Complete) Subscribe(observer Float32Observer) Subscrip
 	return subscription
 }
 
-func FromFloat32Complete() *Float32Stream {
-	return FromFloat32Observable(&ObservableFloat32Complete{})
+func EmptyFloat32() *Float32Stream {
+	return FromFloat32Observable(&EmptyFloat32Observable{})
 }
 
 type ObservableFloat32Error struct {
@@ -1281,7 +1314,7 @@ func (o *ObservableFloat32Error) Subscribe(observer Float32Observer) Subscriptio
 	return subscription
 }
 
-func FromFloat32Error(err error) *Float32Stream {
+func ThrowFloat32(err error) *Float32Stream {
 	return FromFloat32Observable(&ObservableFloat32Error{ err })
 }
 
