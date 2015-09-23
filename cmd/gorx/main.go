@@ -1,11 +1,14 @@
 package main
 
 import (
+	"fmt"
+	"go/ast"
+	"go/parser"
 	"io/ioutil"
 	"os"
 	"os/exec"
 	"path/filepath"
-	"regexp"
+	"reflect"
 	"strings"
 
 	"github.com/alecthomas/template"
@@ -13,14 +16,13 @@ import (
 )
 
 var (
-	packageArg  = kingpin.Arg("package", "Go package.").Required().String()
-	typesArg    = kingpin.Arg("types", "List of types to provide Reactive types for.").Strings()
-	importsFlag = kingpin.Flag("import", "Extra imports.").Strings()
-	outputFlag  = kingpin.Flag("output", "File to write to.").Short('o').String()
-	debugFlag   = kingpin.Flag("debug", "Debug mode.").Bool()
+	packageArg    = kingpin.Arg("package", "Go package.").Required().String()
+	typesArg      = kingpin.Arg("types", "List of types to provide Reactive types for.").Strings()
+	importsFlag   = kingpin.Flag("import", "Extra imports.").PlaceHolder("PKG...").Strings()
+	outputFlag    = kingpin.Flag("output", "File to write to.").Short('o').String()
+	debugFlag     = kingpin.Flag("debug", "Debug mode.").Bool()
+	maxReplayFlag = kingpin.Flag("max-replay", "Maximum size of replayed data.").Default("16384").Int()
 )
-
-var mapExtractRe = regexp.MustCompile(`map\[([^\]]+)\](.*)`)
 
 var reactTemplate = `package {{.Package}}
 
@@ -28,12 +30,18 @@ var reactTemplate = `package {{.Package}}
 
 import (
 	"errors"
+	"time"
+	"sync"
 	"sync/atomic"
 {{range .Imports}}
 	"{{.}}"
 {{end}}\
 )
 
+// Maximum size of a replay buffer. Can be modified.
+var MaxReplaySize = {{.MaxReplaySize}}
+
+// A Subscription to an observable.
 type Subscription interface {
 	// Unsubscribe from the subscription.
 	Unsubscribe()
@@ -41,7 +49,41 @@ type Subscription interface {
 	Unsubscribed() bool
 }
 
+// A Subscription that is already closed.
+type ClosedSubscription struct {}
+func (ClosedSubscription) Unsubscribe() {}
+func (ClosedSubscription) Unsubscribed() bool { return true }
+
+
+
+// ChannelSubscription is implemented with a channel which is closed when
+// unsubscribed.
+type ChannelSubscription chan struct{}
+
+func NewChannelSubscription() Subscription {
+	return make(ChannelSubscription)
+}
+
+func (c ChannelSubscription) Unsubscribe() {
+	defer recover()
+	close(c)
+}
+
+func (c ChannelSubscription) Unsubscribed() bool {
+	select {
+	case _, ok := <-c:
+		return !ok
+	default:
+		return false
+	}
+}
+
+// GenericSubscription is implemented with atomic operations.
 type GenericSubscription int32
+
+func NewGenericSubscription() Subscription {
+	return new(GenericSubscription)
+}
 
 func (t *GenericSubscription) Unsubscribe() {
 	atomic.StoreInt32((*int32)(t), 1)
@@ -51,13 +93,14 @@ func (t *GenericSubscription) Unsubscribed() bool {
 	return atomic.LoadInt32((*int32)(t)) == 1
 }
 
-type PartialObserver interface {
+// TerminationObserver contains functions for observing termination of a stream.
+type TerminationObserver interface {
 	Error(error)
 	Complete()
 }
 
 type GenericObserver interface {
-	PartialObserver
+	TerminationObserver
 	Next(interface{})
 }
 
@@ -70,10 +113,10 @@ func (f GenericObserverFunc) Complete()             { f(nil, nil, true) }
 type GenericObservableFilter func(next interface{}, err error, complete bool, observer GenericObserver)
 
 // Turtles all the way down!
-type GenericObservableFilterFactory func() GenericObservableFilter
+type GenericObservableFilterFactory func(GenericObserver) GenericObservableFilter
 
 func distinctFilter() GenericObservableFilterFactory {
-	return func() GenericObservableFilter {
+	return func(GenericObserver) GenericObservableFilter {
 		seen := map[interface{}]struct{}{}
 		return func(next interface{}, err error, complete bool, observer GenericObserver) {
 			switch {
@@ -93,7 +136,7 @@ func distinctFilter() GenericObservableFilterFactory {
 }
 
 func elementAtFilter(n int) GenericObservableFilterFactory {
-	return func() GenericObservableFilter {
+	return func(GenericObserver) GenericObservableFilter {
 		i := 0
 		return func(next interface{}, err error, complete bool, observer GenericObserver) {
 			switch {
@@ -112,7 +155,7 @@ func elementAtFilter(n int) GenericObservableFilterFactory {
 }
 
 func filterFilter(f func(next interface{}) bool) GenericObservableFilterFactory {
-	return func() GenericObservableFilter {
+	return func(GenericObserver) GenericObservableFilter {
 		return func(next interface{}, err error, complete bool, observer GenericObserver) {
 			switch {
 			case err != nil:
@@ -129,7 +172,7 @@ func filterFilter(f func(next interface{}) bool) GenericObservableFilterFactory 
 }
 
 func firstFilter() GenericObservableFilterFactory {
-	return func() GenericObservableFilter {
+	return func(GenericObserver) GenericObservableFilter {
 		start := true
 		return func(next interface{}, err error, complete bool, observer GenericObserver) {
 			switch {
@@ -148,7 +191,7 @@ func firstFilter() GenericObservableFilterFactory {
 }
 
 func lastFilter() GenericObservableFilterFactory {
-	return func() GenericObservableFilter {
+	return func(GenericObserver) GenericObservableFilter {
 		have := false
 		var last interface{}
 		return func(next interface{}, err error, complete bool, observer GenericObserver) {
@@ -171,8 +214,75 @@ func lastFilter() GenericObservableFilterFactory {
 	}
 }
 
+func takeLastFilter(n int) GenericObservableFilterFactory {
+	return func(GenericObserver) GenericObservableFilter {
+		read := 0
+		write := 0
+		n++
+		buffer := make([]interface{}, n)
+		return func(next interface{}, err error, complete bool, observer GenericObserver) {
+			switch {
+			case err != nil:
+				for read != write {
+					observer.Next(buffer[read])
+					read = (read + 1) % n
+				}
+				observer.Error(err)
+			case complete:
+				for read != write {
+					observer.Next(buffer[read])
+					read = (read + 1) % n
+				}
+				observer.Complete()
+			default:
+				buffer[write] = next
+				write = (write + 1) % n
+				if write == read {
+					read = (read + 1) % n
+				}
+			}
+		}
+	}
+}
+
+func takeFilter(n int) GenericObservableFilterFactory {
+	return func(GenericObserver) GenericObservableFilter {
+		taken := 0
+		return func(next interface{}, err error, complete bool, observer GenericObserver) {
+			if taken >= n {
+				return
+			}
+			switch {
+			case err != nil:
+				observer.Error(err)
+			case complete:
+				observer.Complete()
+			default:
+				observer.Next(next)
+				taken++
+				if taken >= n {
+					observer.Complete()
+				}
+			}
+		}
+	}
+}
+
+func ignoreElementsFilter() GenericObservableFilterFactory {
+	return func(GenericObserver) GenericObservableFilter {
+		return func(next interface{}, err error, complete bool, observer GenericObserver) {
+			switch {
+			case err != nil:
+				observer.Error(err)
+			case complete:
+				observer.Complete()
+			}
+		}
+	}
+}
+
 func skipFilter(n int) GenericObservableFilterFactory {
-	return func() GenericObservableFilter {
+	return func(GenericObserver) GenericObservableFilter {
 		i := 0
 		return func(next interface{}, err error, complete bool, observer GenericObserver) {
 			switch {
@@ -191,11 +301,11 @@ func skipFilter(n int) GenericObservableFilterFactory {
 }
 
 func skipLastFilter(n int) GenericObservableFilterFactory {
-	return func() GenericObservableFilter {
+	return func(GenericObserver) GenericObservableFilter {
 		read := 0
 		write := 0
-		buffer := make([]interface{}, n+1)
 		n++
+		buffer := make([]interface{}, n)
 		return func(next interface{}, err error, complete bool, observer GenericObserver) {
 			switch {
 			case err != nil:
@@ -215,15 +325,18 @@ func skipLastFilter(n int) GenericObservableFilterFactory {
 }
 
 func oneFilter() GenericObservableFilterFactory {
-	return func() GenericObservableFilter {
+	return func(GenericObserver) GenericObservableFilter {
 		count := 0
 		var value interface{}
 		return func(next interface{}, err error, complete bool, observer GenericObserver) {
+			if count > 1 {
+				return
+			}
 			switch {
 			case err != nil:
 				observer.Error(err)
 			case complete:
-				if count != 1 {
+				if count == 2 {
 					observer.Error(errors.New("expected one value"))
 				} else {
 					observer.Next(value)
@@ -241,19 +354,232 @@ func oneFilter() GenericObservableFilterFactory {
 	}
 }
 
-func raiseFilter(err error) GenericObservableFilterFactory {
-	return func() GenericObservableFilter {
+func sampleFilter(window time.Duration) GenericObservableFilterFactory {
+	return func(observer GenericObserver) GenericObservableFilter {
+		mutex := &sync.Mutex{}
+		cancel := make(chan bool, 1)
+		var last interface{}
+		haveNew := false
+		go func() {
+			for {
+				select {
+				case <-time.After(window):
+					mutex.Lock()
+					if haveNew {
+						observer.Next(last)
+						haveNew = false
+					}
+					mutex.Unlock()
+				case <-cancel:
+					return
+				}
+			}
+		}()
 		return func(next interface{}, err error, complete bool, observer GenericObserver) {
-			observer.Error(err)
+			switch {
+			case err != nil:
+				cancel <- true
+				observer.Error(err)
+			case complete:
+				cancel <- true
+				observer.Complete()
+			default:
+				mutex.Lock()
+				last = next
+				haveNew = true
+				mutex.Unlock()
+			}
 		}
 	}
+}
+
+func debounceFilter(duration time.Duration) GenericObservableFilterFactory {
+	return func(observer GenericObserver) GenericObservableFilter {
+		errch := make(chan error)
+		completech := make(chan bool)
+		valuech := make(chan interface{})
+		go func() {
+			var timeout <-chan time.Time
+			var nextValue interface{}
+			for {
+				select {
+				case <-timeout:
+					observer.Next(nextValue)
+					timeout = nil
+				case nextValue = <-valuech:
+					timeout = time.After(duration)
+				case err := <-errch:
+					if timeout != nil {
+						observer.Next(nextValue)
+					}
+					observer.Error(err)
+					return
+				case <-completech:
+					if timeout != nil {
+						observer.Next(nextValue)
+					}
+					observer.Complete()
+					return
+				}
+			}
+		}()
+		return func(next interface{}, err error, complete bool, observer GenericObserver) {
+			switch {
+			case err != nil:
+				errch <- err
+			case complete:
+				completech <- true
+			default:
+				valuech <- next
+			}
+		}
+	}
+}
+
+type timedEntry struct {
+	v interface{}
+	t time.Time
+}
+
+func replayFilter(size int, duration time.Duration) GenericObservableFilterFactory {
+	read := 0
+	write := 0
+	if size == 0 {
+		size = MaxReplaySize
+	}
+	if duration == 0 {
+		duration = time.Hour * 24 * 7 * 52
+	}
+	size++
+	buffer := make([]timedEntry, size)
+	return func(observer GenericObserver) GenericObservableFilter {
+		return func(next interface{}, err error, complete bool, observer GenericObserver) {
+			now := time.Now()
+			switch {
+			case err != nil:
+				cursor := read
+				for cursor != write {
+					if buffer[cursor].t.After(now) {
+						observer.Next(buffer[cursor].v)
+					}
+					cursor = (cursor + 1) % size
+				}
+				observer.Error(err)
+			case complete:
+				cursor := read
+				for cursor != write {
+					if buffer[cursor].t.After(now) {
+						observer.Next(buffer[cursor].v)
+					}
+					cursor = (cursor + 1) % size
+				}
+				observer.Complete()
+			default:
+				buffer[write] = timedEntry{next, time.Now().Add(duration)}
+				write = (write + 1) % size
+				if write == read {
+					if buffer[read].t.After(now) {
+						observer.Next(buffer[read].v)
+					}
+					read = (read + 1) % size
+				}
+			}
+		}
+	}
+}
+
+func Range(start, end int) *IntStream {
+	return CreateInt(func(observer IntObserver, subscription Subscription) {
+		for i := start; i < end; i++ {
+			if subscription.Unsubscribed() {
+				return
+			}
+			observer.Next(i)
+		}
+		observer.Complete()
+		subscription.Unsubscribe()
+	})
+}
+
+func Interval(interval time.Duration) *IntStream {
+	return CreateInt(func(observer IntObserver, subscription Subscription) {
+		i := 0
+		for {
+			time.Sleep(interval)
+			if subscription.Unsubscribed() {
+				return
+			}
+			observer.Next(i)
+			i++
+		}
+	})
 }
 
 {{range $type := .Types}}
 {{with $name := .|TypeName}}
 type {{$name}}Observer interface {
 	Next({{$type}})
-	PartialObserver
+	TerminationObserver
+}
+
+func {{$name}}ObserverAsGenericObserver(observer {{$name}}Observer) GenericObserver {
+	return GenericObserverFunc(func(next interface{}, err error, complete bool) {
+		switch {
+		case err != nil:
+			observer.Error(err)
+		case complete:
+			observer.Complete()
+		default:
+			observer.Next(next.({{$type}}))
+		}
+	})
+}
+
+func GenericObserverAs{{$name}}Observer(observer GenericObserver) {{$name}}Observer {
+	return {{$name}}ObserverFunc(func(next {{$type}}, err error, complete bool) {
+		switch {
+		case err != nil:
+			observer.Error(err)
+		case complete:
+			observer.Complete()
+		default:
+			observer.Next(next)
+		}
+	})
+}
+
+type {{$name}}ObservableFactory func (observer {{$name}}Observer, subscription Subscription)
+
+func (f {{$name}}ObservableFactory) Subscribe(observer {{$name}}Observer) Subscription {
+	subscription := NewGenericSubscription()
+	go f(observer, subscription)
+	return subscription
+}
+
+// Create{{$name}} calls f(observer, subscription) to produce values for a stream.
+func Create{{$name}}(f func (observer {{$name}}Observer, subscription Subscription)) *{{$name}}Stream {
+	return From{{$name}}Observable({{$name}}ObservableFactory(f))
+}
+
+// Repeat value count times.
+func Repeat{{$name}}(value {{$type}}, count int) *{{$name}}Stream {
+	return Create{{$name}}(func (observer {{$name}}Observer, subscription Subscription) {
+		for i := 0; i < count; i++ {
+			if subscription.Unsubscribed() {
+				return
+			}
+			observer.Next(value)
+		}
+		observer.Complete()
+	})
+}
+
+// Start creates an observable with the result of a function call.
+func Start{{$name}}(f func () {{$type}}) *{{$name}}Stream {
+	return Create{{$name}}(func (observer {{$name}}Observer, subscription Subscription) {
+		observer.Next(f())
+		observer.Complete()
+	})
 }
 
 func Passthrough{{$name}}(next {{$type}}, err error, complete bool, observer {{$name}}Observer) {
@@ -281,112 +607,63 @@ type {{$name}}Observable interface {
 
 // Convert a GenericObservableFilter to a {{$name}}Observable
 func (f GenericObservableFilterFactory) {{$name}}(parent {{$name}}Observable) {{$name}}Observable {
-	return Map{{$name}}{{$name}}Observable(parent, func() Mapping{{$name}}{{$name}}Func {
-		// Initialise the adapter.
-		filter := f()
-		return func(next {{$type}}, err error, complete bool, observer {{$name}}Observer) {
-			filter(next, err, complete, GenericObserverFunc(func(next interface{}, err error, complete bool) {
-				switch {
-				case err != nil:
-					observer.Error(err)
-				case complete:
-					observer.Complete()
-				default:
-					observer.Next(next.({{$type}}))
-				}
-			}))
-		}
-	})
-}
-
-type Never{{$name}}Observable struct {}
-
-func (o *Never{{$name}}Observable) Subscribe(observer {{$name}}Observer) Subscription {
-	subscription := new(GenericSubscription)
-	return subscription
+	return Map{{$name}}2{{$name}}Observable(parent, func(observer {{$name}}Observer) Mapping{{$name}}2{{$name}}Func {
+			gobserver := {{$name}}ObserverAsGenericObserver(observer)
+			filter := f(gobserver)
+			return func(next {{$type}}, err error, complete bool, observer {{$name}}Observer) {
+				filter(next, err, complete, gobserver)
+			}
+		},
+	)
 }
 
 func Never{{$name}}() *{{$name}}Stream {
-	return From{{$name}}Observable(&Never{{$name}}Observable{})
-}
-
-type Empty{{$name}}Observable struct {}
-
-func (o *Empty{{$name}}Observable) Subscribe(observer {{$name}}Observer) Subscription {
-	subscription := new(GenericSubscription)
-	go func() {
-		observer.Complete()
-		subscription.Unsubscribe()
-	}()
-	return subscription
+	return Create{{$name}}(func (observer {{$name}}Observer, subscription Subscription) {})
 }
 
 func Empty{{$name}}() *{{$name}}Stream {
-	return From{{$name}}Observable(&Empty{{$name}}Observable{})
-}
-
-type Observable{{$name}}Error struct {
-	Err error
-}
-
-func (o *Observable{{$name}}Error) Error() string {
-	return o.Err.Error()
-}
-
-func (o *Observable{{$name}}Error) Subscribe(observer {{$name}}Observer) Subscription {
-	subscription := new(GenericSubscription)
-	go func() {
-		observer.Error(o)
-		subscription.Unsubscribe()
-	}()
-	return subscription
+	return Create{{$name}}(func (observer {{$name}}Observer, subscription Subscription) {
+		observer.Complete()
+	})
 }
 
 func Throw{{$name}}(err error) *{{$name}}Stream {
-	return From{{$name}}Observable(&Observable{{$name}}Error{ err })
-}
-
-type Observable{{$name}}Array []{{$type}}
-
-func (o Observable{{$name}}Array) Subscribe(observer {{$name}}Observer) Subscription {
-	subscription := new(GenericSubscription)
-	go func() {
-		for _, v := range o {
-			observer.Next(v)
-			if subscription.Unsubscribed() {
-				break
-			}
-		}
-		observer.Complete()
-		subscription.Unsubscribe()
-	}()
-	return subscription
+	return Create{{$name}}(func (observer {{$name}}Observer, subscription Subscription) {
+		observer.Error(err)
+	})
 }
 
 func From{{$name}}Array(array []{{$type}}) *{{$name}}Stream {
-	return From{{$name}}Observable(Observable{{$name}}Array(array))
-}
-
-type Observable{{$name}}Channel <-chan {{$type}}
-
-func (o Observable{{$name}}Channel) Subscribe(observer {{$name}}Observer) Subscription {
-	subscription := new(GenericSubscription)
-	go func() {
-		for v := range o {
-			observer.Next(v)
+	return Create{{$name}}(func (observer {{$name}}Observer, subscription Subscription) {
+		for _, v := range array {
 			if subscription.Unsubscribed() {
-				break
+				return
 			}
+			observer.Next(v)
 		}
 		observer.Complete()
 		subscription.Unsubscribe()
-	}()
-	return subscription
+	})
 }
 
+func From{{$name}}s(array ...{{$type}}) *{{$name}}Stream {
+	return From{{$name}}Array(array)
+}
+
+func Just{{$name}}(element {{$type}}) *{{$name}}Stream {
+	return From{{$name}}Array([]{{$type}}{element})
+}
 
 func From{{$name}}Channel(ch <-chan {{$type}}) *{{$name}}Stream {
-	return From{{$name}}Observable(Observable{{$name}}Channel(ch))
+	return Create{{$name}}(func (observer {{$name}}Observer, subscription Subscription) {
+		for v := range ch {
+			if subscription.Unsubscribed() {
+				return
+			}
+			observer.Next(v)
+		}
+		observer.Complete()
+	})
 }
 
 type {{$name}}Stream struct {
@@ -399,6 +676,14 @@ func From{{$name}}Observable(observable {{$name}}Observable) *{{$name}}Stream {
 
 func (s *{{$name}}Stream) SubscribeFunc(f {{$name}}ObserverFunc) Subscription {
 	return s.Subscribe(f)
+}
+
+func (s *{{$name}}Stream) SubscribeNext(f func (v {{$type}})) Subscription {
+	return s.SubscribeFunc(func (next {{$type}}, err error, complete bool) {
+		if err == nil && !complete {
+			f(next)
+		}
+	})
 }
 
 // Distinct removes duplicate elements in the stream.
@@ -436,9 +721,200 @@ func (s *{{$name}}Stream) SkipLast(n int) *{{$name}}Stream {
 	return From{{$name}}Observable(skipLastFilter(n).{{$name}}(s))
 }
 
+// Take returns just the first N elements of the stream.
+func (s *{{$name}}Stream) Take(n int) *{{$name}}Stream {
+	return From{{$name}}Observable(takeFilter(n).{{$name}}(s))
+}
+
+// TakeLast returns just the last N elements of the stream.
+func (s *{{$name}}Stream) TakeLast(n int) *{{$name}}Stream {
+	return From{{$name}}Observable(takeLastFilter(n).{{$name}}(s))
+}
+
+// IgnoreElements ignores elements of the stream and emits only the completion events.
+func (s *{{$name}}Stream) IgnoreElements() *{{$name}}Stream {
+	return From{{$name}}Observable(ignoreElementsFilter().{{$name}}(s))
+}
+
+func (s *{{$name}}Stream) Replay(size int, duration time.Duration) *{{$name}}Stream {
+	return From{{$name}}Observable(replayFilter(size, duration).{{$name}}(s))
+}
+
+func (s *{{$name}}Stream) Sample(duration time.Duration) *{{$name}}Stream {
+	return From{{$name}}Observable(sampleFilter(duration).{{$name}}(s))
+}
+
+func (s *{{$name}}Stream) Debounce(duration time.Duration) *{{$name}}Stream {
+	return From{{$name}}Observable(debounceFilter(duration).{{$name}}(s))
+}
+
+// Wait for completion of the stream and return any error.
+func (s *{{$name}}Stream) Wait() error {
+	errch := make(chan error, 1)
+	s.SubscribeFunc(func(next {{$type}}, err error, complete bool) {
+		switch {
+		case err != nil:
+			errch <- err
+		case complete:
+			errch <- nil
+		default:
+		}
+	})
+	return <-errch
+}
+
+type concat{{$name}}Observable struct {
+	observables []{{$name}}Observable
+}
+
+type concat{{$name}}Observer struct {
+	lock         sync.Mutex
+	observable   int
+	observer     {{$name}}Observer
+	observables  []{{$name}}Observable
+	subscription Subscription
+}
+
+func (c *concat{{$name}}Observer) concat(next {{$type}}, err error, complete bool) {
+	c.lock.Lock()
+	defer c.lock.Unlock()
+	if c.subscription.Unsubscribed() || c.observable >= len(c.observables) {
+		return
+	}
+	switch {
+	case err != nil:
+		c.observer.Error(err)
+		c.observable = len(c.observables)
+	case complete:
+		c.observable++
+		if c.observable >= len(c.observables) {
+			c.observer.Complete()
+			return
+		}
+		c.observables[c.observable].Subscribe({{$name}}ObserverFunc(c.concat))
+	default:
+		c.observer.Next(next)
+	}
+}
+
+func (m *concat{{$name}}Observable) Subscribe(observer {{$name}}Observer) Subscription {
+	subscription := NewGenericSubscription()
+	concatObserver := &concat{{$name}}Observer{
+		observer:     observer,
+		subscription: subscription,
+		observables:  m.observables,
+	}
+	if len(m.observables) > 0 {
+		m.observables[0].Subscribe({{$name}}ObserverFunc(concatObserver.concat))
+	} else {
+		subscription.Unsubscribe()
+	}
+	return subscription
+}
+
+func (s *{{$name}}Stream) Concat(observables ... {{$name}}Observable) *{{$name}}Stream {
+	return &{{$name}}Stream{&concat{{$name}}Observable{append([]{{$name}}Observable{s}, observables...)} }
+}
+
+type merge{{$name}}Observable struct {
+	observables []{{$name}}Observable
+}
+
+func (m *merge{{$name}}Observable) Subscribe(observer {{$name}}Observer) Subscription {
+	subscription := NewGenericSubscription()
+	lock := sync.Mutex{}
+	completed := 0
+	relay := func(next {{$type}}, err error, complete bool) {
+		lock.Lock()
+		defer lock.Unlock()
+		if completed >= len(m.observables) {
+			return
+		}
+
+		switch {
+		case err != nil:
+			observer.Error(err)
+			completed = len(m.observables)
+
+		case complete:
+			completed++
+			if completed == len(m.observables) {
+				observer.Complete()
+			}
+		default:
+			observer.Next(next)
+		}
+	}
+	for _, observable := range m.observables {
+		observable.Subscribe({{$name}}ObserverFunc(relay))
+	}
+	return subscription
+}
+
+// Merge an arbitrary
+func (s *{{$name}}Stream) Merge(other ... {{$name}}Observable) *{{$name}}Stream {
+	return &{{$name}}Stream{&merge{{$name}}Observable{ append(other, s) } }
+}
+
+type catch{{$name}}Observable struct {
+	parent {{$name}}Observable
+	catch {{$name}}Observable
+}
+
+func (r *catch{{$name}}Observable) Subscribe(observer {{$name}}Observer) Subscription {
+	subscription := NewGenericSubscription()
+	run := func(next {{$type}}, err error, complete bool) {
+		switch {
+		case err != nil:
+			r.catch.Subscribe(observer)
+		case complete:
+			observer.Complete()
+		default:
+			observer.Next(next)
+		}
+	}
+	r.parent.Subscribe({{$name}}ObserverFunc(run))
+	return subscription
+}
+
+func (s *{{$name}}Stream) Catch(catch {{$name}}Observable) *{{$name}}Stream {
+	return &{{$name}}Stream{ &catch{{$name}}Observable{s, catch} }
+}
+
+type retry{{$name}}Observable struct {
+	observable {{$name}}Observable
+}
+
+type retry{{$name}}Observer struct {
+	observable {{$name}}Observable
+	observer {{$name}}Observer
+}
+
+func (r *retry{{$name}}Observer) retry(next {{$type}}, err error, complete bool) {
+	switch {
+	case err != nil:
+		r.observable.Subscribe({{$name}}ObserverFunc(r.retry))
+	case complete:
+		r.observer.Complete()
+	default:
+		r.observer.Next(next)
+	}
+}
+
+func (r *retry{{$name}}Observable) Subscribe(observer {{$name}}Observer) Subscription {
+	subscription := NewGenericSubscription()
+	ro := &retry{{$name}}Observer{r.observable, observer}
+	r.observable.Subscribe({{$name}}ObserverFunc(ro.retry))
+	return subscription
+}
+
+func (s *{{$name}}Stream) Retry() *{{$name}}Stream {
+	return &{{$name}}Stream{ &retry{{$name}}Observable{s} }
+}
+
 // Do applies a function for each value passing through the stream.
 func (s *{{$name}}Stream) Do(f func(next {{$type}})) *{{$name}}Stream {
-	return From{{$name}}Observable(Map{{$name}}{{$name}}ObserveNext(s, func(next {{$type}}) {{$type}} {
+	return From{{$name}}Observable(Map{{$name}}2{{$name}}ObserveNext(s, func(next {{$type}}) {{$type}} {
 		f(next)
 		return next
 	}))
@@ -446,50 +922,59 @@ func (s *{{$name}}Stream) Do(f func(next {{$type}})) *{{$name}}Stream {
 
 // DoOnError applies a function for any error on the stream.
 func (s *{{$name}}Stream) DoOnError(f func(err error)) *{{$name}}Stream {
-	return From{{$name}}Observable(Map{{$name}}{{$name}}Observable(s, func() Mapping{{$name}}{{$name}}Func {
-		return func(next {{$type}}, err error, complete bool, observer {{$name}}Observer) {
-			if err != nil {
-				f(err)
-			}
-			Passthrough{{$name}}(next, err, complete, observer)
+	return From{{$name}}Observable(Map{{$name}}2{{$name}}ObserveDirect(s, func(next {{$type}}, err error, complete bool, observer {{$name}}Observer) {
+		if err != nil {
+			f(err)
 		}
+		Passthrough{{$name}}(next, err, complete, observer)
 	}))
 }
 
 // DoOnComplete applies a function when the stream completes.
 func (s *{{$name}}Stream) DoOnComplete(f func()) *{{$name}}Stream {
-	return From{{$name}}Observable(Map{{$name}}{{$name}}Observable(s, func() Mapping{{$name}}{{$name}}Func {
-		return func(next {{$type}}, err error, complete bool, observer {{$name}}Observer) {
-			if complete {
-				f()
-			}
-			Passthrough{{$name}}(next, err, complete, observer)
+	return From{{$name}}Observable(Map{{$name}}2{{$name}}ObserveDirect(s, func(next {{$type}}, err error, complete bool, observer {{$name}}Observer) {
+		if complete {
+			f()
 		}
+		Passthrough{{$name}}(next, err, complete, observer)
 	}))
 }
 
 func (s *{{$name}}Stream) Reduce(initial {{$type}}, reducer func ({{$type}}, {{$type}}) {{$type}}) *{{$name}}Stream {
-	return From{{$name}}Observable(Map{{$name}}{{$name}}Observable(s, func() Mapping{{$name}}{{$name}}Func {
-		value := initial
-		return func(next {{$type}}, err error, complete bool, observer {{$name}}Observer) {
-			switch {
-			case err != nil:
-				observer.Next(value)
-				observer.Error(err)
-			case complete:
-				observer.Next(value)
-				observer.Complete()
-			default:
-				value = reducer(value, next)
-			}
+	value := initial
+	return From{{$name}}Observable(Map{{$name}}2{{$name}}ObserveDirect(s, func(next {{$type}}, err error, complete bool, observer {{$name}}Observer) {
+		switch {
+		case err != nil:
+			observer.Next(value)
+			observer.Error(err)
+		case complete:
+			observer.Next(value)
+			observer.Complete()
+		default:
+			value = reducer(value, next)
+		}
+	}))
+}
+
+func (s *{{$name}}Stream) Scan(initial {{$type}}, f func ({{$type}}, {{$type}}) {{$type}}) *{{$name}}Stream {
+	value := initial
+	return From{{$name}}Observable(Map{{$name}}2{{$name}}ObserveDirect(s, func(next {{$type}}, err error, complete bool, observer {{$name}}Observer) {
+		switch {
+		case err != nil:
+			observer.Error(err)
+		case complete:
+			observer.Complete()
+		default:
+			value = f(value, next)
+			observer.Next(value)
 		}
 	}))
 }
 
 // ToOneWithError blocks until the stream emits exactly one value. Otherwise, it errors.
 func (s *{{$name}}Stream) ToOneWithError() ({{$type}}, error) {
-	valuech := make(chan {{$type}})
-	errch := make(chan error)
+	valuech := make(chan {{$type}}, 1)
+	errch := make(chan error, 1)
 	From{{$name}}Observable(oneFilter().{{$name}}(s)).SubscribeFunc(func (next {{$type}}, err error, complete bool) {
 		if err != nil {
 			errch <- err
@@ -505,21 +990,23 @@ func (s *{{$name}}Stream) ToOneWithError() ({{$type}}, error) {
 	}
 }
 
+// ToOne blocks and returns the only value emitted by the stream, or the zero
+// value if an error occurs.
 func (s *{{$name}}Stream) ToOne() {{$type}} {
 	value, _ := s.ToOneWithError()
 	return value
 }
 
-// ToArrayWithError collects all values from the stream into an array, returning it and any error.
+// ToArrayWithError collects all values from the stream into an array,
+// returning it and any error.
 func (s *{{$name}}Stream) ToArrayWithError() ([]{{$type}}, error) {
 	array := []{{$type}}{}
-	completech := make(chan bool)
-	errch := make(chan error)
+	completech := make(chan bool, 1)
+	errch := make(chan error, 1)
 	s.SubscribeFunc(func(next {{$type}}, err error, complete bool) {
 		switch {
 		case err != nil:
 			errch <- err
-			completech <- true
 		case complete:
 			completech <- true
 		default:
@@ -534,6 +1021,7 @@ func (s *{{$name}}Stream) ToArrayWithError() ([]{{$type}}, error) {
 	}
 }
 
+// ToArray blocks and returns the values from the stream in an array.
 func (s *{{$name}}Stream) ToArray() []{{$type}} {
 	out, _ := s.ToArrayWithError()
 	return out
@@ -541,12 +1029,13 @@ func (s *{{$name}}Stream) ToArray() []{{$type}} {
 
 // ToChannelWithError returns value and error channels corresponding to the stream elements and any error.
 func (s *{{$name}}Stream) ToChannelWithError() (<-chan {{$type}}, <-chan error) {
-	ch := make(chan {{$type}})
-	errch := make(chan error)
+	ch := make(chan {{$type}}, 1)
+	errch := make(chan error, 1)
 	s.SubscribeFunc(func(next {{$type}}, err error, complete bool) {
 		switch {
 		case err != nil:
 			errch <- err
+			close(errch)
 		case complete:
 			close(ch)
 		default:
@@ -563,117 +1052,107 @@ func (s *{{$name}}Stream) ToChannel() <-chan {{$type}} {
 
 // Count returns an IntStream with the count of elements in this stream.
 func (s *{{$name}}Stream) Count() *IntStream {
-	return FromIntObservable(Map{{$name}}IntObservable(s, func() Mapping{{$name}}IntFunc {
-		count := 0
-		return func(next {{$type}}, err error, complete bool, observer IntObserver) {
-			switch {
-			case err != nil:
-				observer.Next(count)
-				observer.Error(err)
-			case complete:
-				observer.Next(count)
-				observer.Complete()
-			default:
-				count++
-			}
+	count := 0
+	return FromIntObservable(Map{{$name}}2IntObserveDirect(s, func(next {{$type}}, err error, complete bool, observer IntObserver) {
+		switch {
+		case err != nil:
+			observer.Next(count)
+			observer.Error(err)
+		case complete:
+			observer.Next(count)
+			observer.Complete()
+		default:
+			count++
 		}
 	}))
 }
 
 {{if $type|IsNumeric}}\
 func (s *{{$name}}Stream) Average() *{{$name}}Stream {
-	return From{{$name}}Observable(Map{{$name}}{{$name}}Observable(s, func() Mapping{{$name}}{{$name}}Func {
-		var sum {{$type}}
-		var count {{$type}}
-		return func(next {{$type}}, err error, complete bool, observer {{$name}}Observer) {
-			switch {
-			case err != nil:
-				observer.Next(sum / count)
-				observer.Error(err)
-			case complete:
-				observer.Next(sum / count)
-				observer.Complete()
-			default:
-				sum += next
-				count++
-			}
+	var sum {{$type}}
+	var count {{$type}}
+	return From{{$name}}Observable(Map{{$name}}2{{$name}}ObserveDirect(s, func(next {{$type}}, err error, complete bool, observer {{$name}}Observer) {
+		switch {
+		case err != nil:
+			observer.Next(sum / count)
+			observer.Error(err)
+		case complete:
+			observer.Next(sum / count)
+			observer.Complete()
+		default:
+			sum += next
+			count++
 		}
 	}))
 }
 
 func (s *{{$name}}Stream) Sum() *{{$name}}Stream {
-	return From{{$name}}Observable(Map{{$name}}{{$name}}Observable(s, func() Mapping{{$name}}{{$name}}Func {
-		var sum {{$type}}
-		return func(next {{$type}}, err error, complete bool, observer {{$name}}Observer) {
-			switch {
-			case err != nil:
-				observer.Next(sum)
-				observer.Error(err)
-			case complete:
-				observer.Next(sum)
-				observer.Complete()
-			default:
-				sum += next
-			}
+	var sum {{$type}}
+	return From{{$name}}Observable(Map{{$name}}2{{$name}}ObserveDirect(s, func(next {{$type}}, err error, complete bool, observer {{$name}}Observer) {
+		switch {
+		case err != nil:
+			observer.Next(sum)
+			observer.Error(err)
+		case complete:
+			observer.Next(sum)
+			observer.Complete()
+		default:
+			sum += next
 		}
 	}))
 }
 
 func (s *{{$name}}Stream) Min() *{{$name}}Stream {
-	return From{{$name}}Observable(Map{{$name}}{{$name}}Observable(s, func() Mapping{{$name}}{{$name}}Func {
-		started := false
-		var min {{$type}}
-		return func(next {{$type}}, err error, complete bool, observer {{$name}}Observer) {
-			switch {
-			case err != nil:
-				if started {
-					observer.Next(min)
-				}
-				observer.Error(err)
-			case complete:
-				if started {
-					observer.Next(min)
-				}
-				observer.Complete()
-			default:
-				if started {
-					if min > next {
-						min = next
-					}
-				} else {
+	started := false
+	var min {{$type}}
+	return From{{$name}}Observable(Map{{$name}}2{{$name}}ObserveDirect(s, func(next {{$type}}, err error, complete bool, observer {{$name}}Observer) {
+		switch {
+		case err != nil:
+			if started {
+				observer.Next(min)
+			}
+			observer.Error(err)
+		case complete:
+			if started {
+				observer.Next(min)
+			}
+			observer.Complete()
+		default:
+			if started {
+				if min > next {
 					min = next
-					started = true
 				}
+			} else {
+				min = next
+				started = true
 			}
 		}
 	}))
 }
 
 func (s *{{$name}}Stream) Max() *{{$name}}Stream {
-	return From{{$name}}Observable(Map{{$name}}{{$name}}Observable(s, func() Mapping{{$name}}{{$name}}Func {
-		started := false
-		var max {{$type}}
-		return func(next {{$type}}, err error, complete bool, observer {{$name}}Observer) {
-			switch {
-			case err != nil:
-				if started {
-					observer.Next(max)
-				}
-				observer.Error(err)
-			case complete:
-				if started {
-					observer.Next(max)
-				}
-				observer.Complete()
-			default:
-				if started {
-					if max <= next {
-						max = next
-					}
-				} else {
+	started := false
+	var max {{$type}}
+	return From{{$name}}Observable(Map{{$name}}2{{$name}}ObserveDirect(s, func(next {{$type}}, err error, complete bool, observer {{$name}}Observer) {
+		switch {
+		case err != nil:
+			if started {
+				observer.Next(max)
+			}
+			observer.Error(err)
+		case complete:
+			if started {
+				observer.Next(max)
+			}
+			observer.Complete()
+		default:
+			if started {
+				if max <= next {
 					max = next
-					started = true
 				}
+			} else {
+				max = next
+				started = true
 			}
 		}
 	}))
@@ -682,37 +1161,43 @@ func (s *{{$name}}Stream) Max() *{{$name}}Stream {
 
 {{range $other := $.Types}}\
 {{with $otherName := .|TypeName}}\
-{{with $mapName := printf "%s%s" $name $otherName}}
+{{with $mapName := printf "%s2%s" $name $otherName}}
 type Mapping{{$mapName}}Func func(next {{$type}}, err error, complete bool, observer {{$otherName}}Observer)
-type Mapping{{$mapName}}FuncFactory func() Mapping{{$mapName}}Func
+type Mapping{{$mapName}}FuncFactory func (observer {{$otherName}}Observer) Mapping{{$mapName}}Func
 
 type Mapping{{$mapName}}Observable struct {
 	parent  {{$name}}Observable
-	factory Mapping{{$mapName}}FuncFactory
+	mapper Mapping{{$mapName}}FuncFactory
 }
 
-func Map{{$mapName}}Observable(parent {{$name}}Observable, factory Mapping{{$mapName}}FuncFactory) {{$otherName}}Observable {
+func Map{{$mapName}}Observable(parent {{$name}}Observable, mapper Mapping{{$mapName}}FuncFactory) {{$otherName}}Observable {
 	return &Mapping{{$mapName}}Observable{
 		parent:  parent,
-		factory: factory,
+		mapper: mapper,
 	}
 }
 
+func Map{{$mapName}}ObserveDirect(parent {{$name}}Observable, mapper Mapping{{$mapName}}Func) {{$otherName}}Observable {
+	return Map{{$mapName}}Observable(parent, func({{$otherName}}Observer) Mapping{{$mapName}}Func {
+		return mapper
+	})
+}
+
 func Map{{$mapName}}ObserveNext(parent {{$name}}Observable, mapper func({{$type}}) {{$other}}) {{$otherName}}Observable {
-	return Map{{$mapName}}Observable(parent, func() Mapping{{$mapName}}Func {
-		return func(next {{$type}}, err error, complete bool, observer {{$otherName}}Observer) {
-			var mapped {{$other}}
-			if err == nil && !complete {
-				mapped = mapper(next)
+	return Map{{$mapName}}Observable(parent, func({{$otherName}}Observer) Mapping{{$mapName}}Func {
+			return func(next {{$type}}, err error, complete bool, observer {{$otherName}}Observer) {
+				var mapped {{$other}}
+				if err == nil && !complete {
+					mapped = mapper(next)
+				}
+				Passthrough{{$otherName}}(mapped, err, complete, observer)
 			}
-			Passthrough{{$otherName}}(mapped, err, complete, observer)
-		}
-	},
+		},
 	)
 }
 
 func (f *Mapping{{$mapName}}Observable) Subscribe(observer {{$otherName}}Observer) Subscription {
-	mapper := f.factory()
+	mapper := f.mapper(observer)
 	return f.parent.Subscribe({{$name}}ObserverFunc(func(next {{$type}}, err error, complete bool) {
 		mapper(next, err, complete, observer)
 	}))
@@ -722,7 +1207,7 @@ func (f *Mapping{{$mapName}}Observable) Subscribe(observer {{$otherName}}Observe
 {{if ne $type $other}}\
 // Map{{$otherName}} maps this stream to an {{$otherName}}Stream via f.
 func (s *{{$name}}Stream) Map{{$otherName}}(f func ({{$type}}) {{$other}}) *{{$otherName}}Stream {
-	return From{{$otherName}}Observable(Map{{$name}}{{$otherName}}ObserveNext(s, f))
+	return From{{$otherName}}Observable(Map{{$name}}2{{$otherName}}ObserveNext(s, f))
 }
 {{end}}\
 {{end}}\
@@ -732,24 +1217,38 @@ func (s *{{$name}}Stream) Map{{$otherName}}(f func ({{$type}}) {{$other}}) *{{$o
 `
 
 type Context struct {
-	Package string
-	Types   []string
-	Imports []string
+	Package       string
+	Types         []string
+	Imports       []string
+	MaxReplaySize int
+}
+
+func typeName(t ast.Expr) []string {
+	switch n := t.(type) {
+	case *ast.StarExpr:
+		return typeName(n.X)
+	case *ast.SelectorExpr:
+		// return append(typeName(n.X), typeName(n.Sel)...)
+		return typeName(n.Sel)
+	case *ast.MapType:
+		keys := append([]string{"Map"}, typeName(n.Key)...)
+		return append(keys, typeName(n.Value)...)
+	case *ast.ArrayType:
+		return append([]string{"Array"}, typeName(n.Elt)...)
+	case *ast.Ident:
+		return []string{strings.Title(n.Name)}
+	default:
+		panic(fmt.Sprintf("unknown expression node %s %s\n", reflect.TypeOf(t), t))
+	}
 }
 
 func main() {
 	kingpin.Parse()
 	t := template.Must(template.New("react").Funcs(template.FuncMap{
 		"TypeName": func(s string) string {
-			if strings.HasPrefix(s, "[]") {
-				return strings.Title(s[2:]) + "Array"
-			}
-			match := mapExtractRe.FindAllStringSubmatch(s, -1)
-			if len(match) > 0 {
-				return strings.Title(match[0][1]) + strings.Title(match[0][2]) + "Map"
-			}
-			parts := strings.SplitN(s, ".", -1)
-			return strings.Title(parts[len(parts)-1])
+			st, err := parser.ParseExpr(s)
+			kingpin.FatalIfError(err, "invalid type %q", s)
+			return strings.Join(typeName(st), "")
 		},
 		"IsNumeric": func(v string) bool {
 			switch v {
@@ -794,9 +1293,10 @@ func main() {
 	kingpin.FatalIfError(err, "")
 	kingpin.FatalIfError(cmd.Start(), "")
 	err = t.Execute(stdin, &Context{
-		Package: *packageArg,
-		Types:   *typesArg,
-		Imports: *importsFlag,
+		Package:       *packageArg,
+		Types:         *typesArg,
+		Imports:       *importsFlag,
+		MaxReplaySize: *maxReplayFlag,
 	})
 	kingpin.FatalIfError(err, "")
 	stdin.Close()
