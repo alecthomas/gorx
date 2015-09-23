@@ -4,9 +4,10 @@ package gorx
 
 import (
 	"errors"
-	"time"
+	"io"
 	"sync"
 	"sync/atomic"
+	"time"
 )
 
 // Maximum size of a replay buffer. Can be modified.
@@ -15,17 +16,58 @@ var MaxReplaySize = 16384
 // A Subscription to an observable.
 type Subscription interface {
 	// Unsubscribe from the subscription.
-	Unsubscribe()
+	io.Closer
 	// Unsubscribed returns true if this subscription has been unsubscribed.
 	Unsubscribed() bool
 }
 
 // A Subscription that is already closed.
-type ClosedSubscription struct {}
-func (ClosedSubscription) Unsubscribe() {}
+type ClosedSubscription struct{}
+
+func (ClosedSubscription) Close() error       { return nil }
 func (ClosedSubscription) Unsubscribed() bool { return true }
 
+// A LinkedSubscription is a link to a (possible) future Subscription.
+type LinkedSubscription struct {
+	lock         sync.Mutex
+	unsubscribed bool
+	linked       Subscription
+}
 
+func NewLinkedSubscription() *LinkedSubscription {
+	return &LinkedSubscription{}
+}
+
+func (l *LinkedSubscription) Link(subscription Subscription) {
+	l.lock.Lock()
+	defer l.lock.Unlock()
+	if l.linked != nil {
+		panic("LinkedSubscription is already linked")
+	}
+	l.linked = subscription
+	if l.unsubscribed {
+		l.linked.Close()
+	}
+}
+
+func (l *LinkedSubscription) Close() error {
+	l.lock.Lock()
+	defer l.lock.Unlock()
+	l.unsubscribed = true
+	if l.linked != nil {
+		l.linked.Close()
+	}
+	return nil
+}
+
+func (l *LinkedSubscription) Unsubscribed() bool {
+	l.lock.Lock()
+	defer l.lock.Unlock()
+	if l.linked != nil {
+		return l.linked.Unsubscribed()
+	}
+	return l.unsubscribed
+}
 
 // ChannelSubscription is implemented with a channel which is closed when
 // unsubscribed.
@@ -35,9 +77,10 @@ func NewChannelSubscription() Subscription {
 	return make(ChannelSubscription)
 }
 
-func (c ChannelSubscription) Unsubscribe() {
+func (c ChannelSubscription) Close() error {
 	defer recover()
 	close(c)
+	return nil
 }
 
 func (c ChannelSubscription) Unsubscribed() bool {
@@ -56,8 +99,9 @@ func NewGenericSubscription() Subscription {
 	return new(GenericSubscription)
 }
 
-func (t *GenericSubscription) Unsubscribe() {
+func (t *GenericSubscription) Close() error {
 	atomic.StoreInt32((*int32)(t), 1)
+	return nil
 }
 
 func (t *GenericSubscription) Unsubscribed() bool {
@@ -68,6 +112,7 @@ func (t *GenericSubscription) Unsubscribed() bool {
 type TerminationObserver interface {
 	Error(error)
 	Complete()
+	Unsubscribed() bool
 }
 
 type GenericObserver interface {
@@ -75,11 +120,18 @@ type GenericObserver interface {
 	Next(interface{})
 }
 
-type GenericObserverFunc func(interface{}, error, bool)
+type GenericObserverFunc struct {
+	f func(interface{}, error, bool)
+	Subscription
+}
 
-func (f GenericObserverFunc) Next(next interface{}) { f(next, nil, false) }
-func (f GenericObserverFunc) Error(err error)       { f(nil, err, false) }
-func (f GenericObserverFunc) Complete()             { f(nil, nil, true) }
+func NewGenericObserverFunc(f func(interface{}, error, bool)) *GenericObserverFunc {
+	return &GenericObserverFunc{f, NewGenericSubscription()}
+}
+
+func (f *GenericObserverFunc) Next(next interface{}) { f.f(next, nil, false) }
+func (f *GenericObserverFunc) Error(err error)       { f.f(nil, err, false) }
+func (f *GenericObserverFunc) Complete()             { f.f(nil, nil, true) }
 
 type GenericObservableFilter func(next interface{}, err error, complete bool, observer GenericObserver)
 
@@ -468,7 +520,7 @@ func Range(start, end int) *IntStream {
 			observer.Next(i)
 		}
 		observer.Complete()
-		subscription.Unsubscribe()
+		subscription.Close()
 	})
 }
 
@@ -486,15 +538,13 @@ func Interval(interval time.Duration) *IntStream {
 	})
 }
 
-
-
 type IntObserver interface {
 	Next(int)
 	TerminationObserver
 }
 
 func IntObserverAsGenericObserver(observer IntObserver) GenericObserver {
-	return GenericObserverFunc(func(next interface{}, err error, complete bool) {
+	return NewGenericObserverFunc(func(next interface{}, err error, complete bool) {
 		switch {
 		case err != nil:
 			observer.Error(err)
@@ -507,7 +557,7 @@ func IntObserverAsGenericObserver(observer IntObserver) GenericObserver {
 }
 
 func GenericObserverAsIntObserver(observer GenericObserver) IntObserver {
-	return IntObserverFunc(func(next int, err error, complete bool) {
+	return NewIntObserverFunc(func(next int, err error, complete bool) {
 		switch {
 		case err != nil:
 			observer.Error(err)
@@ -519,7 +569,7 @@ func GenericObserverAsIntObserver(observer GenericObserver) IntObserver {
 	})
 }
 
-type IntObservableFactory func (observer IntObserver, subscription Subscription)
+type IntObservableFactory func(observer IntObserver, subscription Subscription)
 
 func (f IntObservableFactory) Subscribe(observer IntObserver) Subscription {
 	subscription := NewGenericSubscription()
@@ -528,13 +578,13 @@ func (f IntObservableFactory) Subscribe(observer IntObserver) Subscription {
 }
 
 // CreateInt calls f(observer, subscription) to produce values for a stream.
-func CreateInt(f func (observer IntObserver, subscription Subscription)) *IntStream {
+func CreateInt(f func(observer IntObserver, subscription Subscription)) *IntStream {
 	return FromIntObservable(IntObservableFactory(f))
 }
 
 // Repeat value count times.
 func RepeatInt(value int, count int) *IntStream {
-	return CreateInt(func (observer IntObserver, subscription Subscription) {
+	return CreateInt(func(observer IntObserver, subscription Subscription) {
 		for i := 0; i < count; i++ {
 			if subscription.Unsubscribed() {
 				return
@@ -546,8 +596,8 @@ func RepeatInt(value int, count int) *IntStream {
 }
 
 // Start creates an observable with the result of a function call.
-func StartInt(f func () int) *IntStream {
-	return CreateInt(func (observer IntObserver, subscription Subscription) {
+func StartInt(f func() int) *IntStream {
+	return CreateInt(func(observer IntObserver, subscription Subscription) {
 		observer.Next(f())
 		observer.Complete()
 	})
@@ -564,13 +614,20 @@ func PassthroughInt(next int, err error, complete bool, observer IntObserver) {
 	}
 }
 
-type IntObserverFunc func(int, error, bool)
+type IntObserverFunc struct {
+	f func(int, error, bool)
+	Subscription
+}
 
 var zeroInt = *new(int)
 
-func (f IntObserverFunc) Next(next int) { f(next, nil, false) }
-func (f IntObserverFunc) Error(err error)  { f(zeroInt, err, false) }
-func (f IntObserverFunc) Complete()        { f(zeroInt, nil, true) }
+func NewIntObserverFunc(f func(int, error, bool)) *IntObserverFunc {
+	return &IntObserverFunc{f, NewGenericSubscription()}
+}
+
+func (f IntObserverFunc) Next(next int)   { f.f(next, nil, false) }
+func (f IntObserverFunc) Error(err error) { f.f(zeroInt, err, false) }
+func (f IntObserverFunc) Complete()       { f.f(zeroInt, nil, true) }
 
 type IntObservable interface {
 	Subscribe(IntObserver) Subscription
@@ -579,33 +636,33 @@ type IntObservable interface {
 // Convert a GenericObservableFilter to a IntObservable
 func (f GenericObservableFilterFactory) Int(parent IntObservable) IntObservable {
 	return MapInt2IntObservable(parent, func(observer IntObserver) MappingInt2IntFunc {
-			gobserver := IntObserverAsGenericObserver(observer)
-			filter := f(gobserver)
-			return func(next int, err error, complete bool, observer IntObserver) {
-				filter(next, err, complete, gobserver)
-			}
-		},
+		gobserver := IntObserverAsGenericObserver(observer)
+		filter := f(gobserver)
+		return func(next int, err error, complete bool, observer IntObserver) {
+			filter(next, err, complete, gobserver)
+		}
+	},
 	)
 }
 
 func NeverInt() *IntStream {
-	return CreateInt(func (observer IntObserver, subscription Subscription) {})
+	return CreateInt(func(observer IntObserver, subscription Subscription) {})
 }
 
 func EmptyInt() *IntStream {
-	return CreateInt(func (observer IntObserver, subscription Subscription) {
+	return CreateInt(func(observer IntObserver, subscription Subscription) {
 		observer.Complete()
 	})
 }
 
 func ThrowInt(err error) *IntStream {
-	return CreateInt(func (observer IntObserver, subscription Subscription) {
+	return CreateInt(func(observer IntObserver, subscription Subscription) {
 		observer.Error(err)
 	})
 }
 
 func FromIntArray(array []int) *IntStream {
-	return CreateInt(func (observer IntObserver, subscription Subscription) {
+	return CreateInt(func(observer IntObserver, subscription Subscription) {
 		for _, v := range array {
 			if subscription.Unsubscribed() {
 				return
@@ -613,7 +670,7 @@ func FromIntArray(array []int) *IntStream {
 			observer.Next(v)
 		}
 		observer.Complete()
-		subscription.Unsubscribe()
+		subscription.Close()
 	})
 }
 
@@ -626,7 +683,7 @@ func JustInt(element int) *IntStream {
 }
 
 func FromIntChannel(ch <-chan int) *IntStream {
-	return CreateInt(func (observer IntObserver, subscription Subscription) {
+	return CreateInt(func(observer IntObserver, subscription Subscription) {
 		for v := range ch {
 			if subscription.Unsubscribed() {
 				return
@@ -645,12 +702,12 @@ func FromIntObservable(observable IntObservable) *IntStream {
 	return &IntStream{observable}
 }
 
-func (s *IntStream) SubscribeFunc(f IntObserverFunc) Subscription {
-	return s.Subscribe(f)
+func (s *IntStream) SubscribeFunc(f func(int, error, bool)) Subscription {
+	return s.Subscribe(NewIntObserverFunc(f))
 }
 
-func (s *IntStream) SubscribeNext(f func (v int)) Subscription {
-	return s.SubscribeFunc(func (next int, err error, complete bool) {
+func (s *IntStream) SubscribeNext(f func(v int)) Subscription {
+	return s.SubscribeFunc(func(next int, err error, complete bool) {
 		if err == nil && !complete {
 			f(next)
 		}
@@ -762,7 +819,7 @@ func (c *concatIntObserver) concat(next int, err error, complete bool) {
 			c.observer.Complete()
 			return
 		}
-		c.observables[c.observable].Subscribe(IntObserverFunc(c.concat))
+		c.observables[c.observable].Subscribe(NewIntObserverFunc(c.concat))
 	default:
 		c.observer.Next(next)
 	}
@@ -776,15 +833,15 @@ func (m *concatIntObservable) Subscribe(observer IntObserver) Subscription {
 		observables:  m.observables,
 	}
 	if len(m.observables) > 0 {
-		m.observables[0].Subscribe(IntObserverFunc(concatObserver.concat))
+		m.observables[0].Subscribe(NewIntObserverFunc(concatObserver.concat))
 	} else {
-		subscription.Unsubscribe()
+		subscription.Close()
 	}
 	return subscription
 }
 
-func (s *IntStream) Concat(observables ... IntObservable) *IntStream {
-	return &IntStream{&concatIntObservable{append([]IntObservable{s}, observables...)} }
+func (s *IntStream) Concat(observables ...IntObservable) *IntStream {
+	return &IntStream{&concatIntObservable{append([]IntObservable{s}, observables...)}}
 }
 
 type mergeIntObservable struct {
@@ -817,19 +874,19 @@ func (m *mergeIntObservable) Subscribe(observer IntObserver) Subscription {
 		}
 	}
 	for _, observable := range m.observables {
-		observable.Subscribe(IntObserverFunc(relay))
+		observable.Subscribe(NewIntObserverFunc(relay))
 	}
 	return subscription
 }
 
 // Merge an arbitrary
-func (s *IntStream) Merge(other ... IntObservable) *IntStream {
-	return &IntStream{&mergeIntObservable{ append(other, s) } }
+func (s *IntStream) Merge(other ...IntObservable) *IntStream {
+	return &IntStream{&mergeIntObservable{append(other, s)}}
 }
 
 type catchIntObservable struct {
 	parent IntObservable
-	catch IntObservable
+	catch  IntObservable
 }
 
 func (r *catchIntObservable) Subscribe(observer IntObserver) Subscription {
@@ -844,12 +901,12 @@ func (r *catchIntObservable) Subscribe(observer IntObserver) Subscription {
 			observer.Next(next)
 		}
 	}
-	r.parent.Subscribe(IntObserverFunc(run))
+	r.parent.Subscribe(NewIntObserverFunc(run))
 	return subscription
 }
 
 func (s *IntStream) Catch(catch IntObservable) *IntStream {
-	return &IntStream{ &catchIntObservable{s, catch} }
+	return &IntStream{&catchIntObservable{s, catch}}
 }
 
 type retryIntObservable struct {
@@ -858,13 +915,13 @@ type retryIntObservable struct {
 
 type retryIntObserver struct {
 	observable IntObservable
-	observer IntObserver
+	observer   IntObserver
 }
 
 func (r *retryIntObserver) retry(next int, err error, complete bool) {
 	switch {
 	case err != nil:
-		r.observable.Subscribe(IntObserverFunc(r.retry))
+		r.observable.Subscribe(NewIntObserverFunc(r.retry))
 	case complete:
 		r.observer.Complete()
 	default:
@@ -875,12 +932,12 @@ func (r *retryIntObserver) retry(next int, err error, complete bool) {
 func (r *retryIntObservable) Subscribe(observer IntObserver) Subscription {
 	subscription := NewGenericSubscription()
 	ro := &retryIntObserver{r.observable, observer}
-	r.observable.Subscribe(IntObserverFunc(ro.retry))
+	r.observable.Subscribe(NewIntObserverFunc(ro.retry))
 	return subscription
 }
 
 func (s *IntStream) Retry() *IntStream {
-	return &IntStream{ &retryIntObservable{s} }
+	return &IntStream{&retryIntObservable{s}}
 }
 
 // Do applies a function for each value passing through the stream.
@@ -911,7 +968,7 @@ func (s *IntStream) DoOnComplete(f func()) *IntStream {
 	}))
 }
 
-func (s *IntStream) Reduce(initial int, reducer func (int, int) int) *IntStream {
+func (s *IntStream) Reduce(initial int, reducer func(int, int) int) *IntStream {
 	value := initial
 	return FromIntObservable(MapInt2IntObserveDirect(s, func(next int, err error, complete bool, observer IntObserver) {
 		switch {
@@ -927,7 +984,7 @@ func (s *IntStream) Reduce(initial int, reducer func (int, int) int) *IntStream 
 	}))
 }
 
-func (s *IntStream) Scan(initial int, f func (int, int) int) *IntStream {
+func (s *IntStream) Scan(initial int, f func(int, int) int) *IntStream {
 	value := initial
 	return FromIntObservable(MapInt2IntObserveDirect(s, func(next int, err error, complete bool, observer IntObserver) {
 		switch {
@@ -946,7 +1003,7 @@ func (s *IntStream) Scan(initial int, f func (int, int) int) *IntStream {
 func (s *IntStream) ToOneWithError() (int, error) {
 	valuech := make(chan int, 1)
 	errch := make(chan error, 1)
-	FromIntObservable(oneFilter().Int(s)).SubscribeFunc(func (next int, err error, complete bool) {
+	FromIntObservable(oneFilter().Int(s)).SubscribeFunc(func(next int, err error, complete bool) {
 		if err != nil {
 			errch <- err
 		} else if !complete {
@@ -1007,6 +1064,7 @@ func (s *IntStream) ToChannelWithError() (<-chan int, <-chan error) {
 		case err != nil:
 			errch <- err
 			close(errch)
+			close(ch)
 		case complete:
 			close(ch)
 		default:
@@ -1129,16 +1187,16 @@ func (s *IntStream) Max() *IntStream {
 }
 
 type MappingInt2IntFunc func(next int, err error, complete bool, observer IntObserver)
-type MappingInt2IntFuncFactory func (observer IntObserver) MappingInt2IntFunc
+type MappingInt2IntFuncFactory func(observer IntObserver) MappingInt2IntFunc
 
 type MappingInt2IntObservable struct {
-	parent  IntObservable
+	parent IntObservable
 	mapper MappingInt2IntFuncFactory
 }
 
 func MapInt2IntObservable(parent IntObservable, mapper MappingInt2IntFuncFactory) IntObservable {
 	return &MappingInt2IntObservable{
-		parent:  parent,
+		parent: parent,
 		mapper: mapper,
 	}
 }
@@ -1151,37 +1209,35 @@ func MapInt2IntObserveDirect(parent IntObservable, mapper MappingInt2IntFunc) In
 
 func MapInt2IntObserveNext(parent IntObservable, mapper func(int) int) IntObservable {
 	return MapInt2IntObservable(parent, func(IntObserver) MappingInt2IntFunc {
-			return func(next int, err error, complete bool, observer IntObserver) {
-				var mapped int
-				if err == nil && !complete {
-					mapped = mapper(next)
-				}
-				PassthroughInt(mapped, err, complete, observer)
+		return func(next int, err error, complete bool, observer IntObserver) {
+			var mapped int
+			if err == nil && !complete {
+				mapped = mapper(next)
 			}
-		},
+			PassthroughInt(mapped, err, complete, observer)
+		}
+	},
 	)
 }
 
 func (f *MappingInt2IntObservable) Subscribe(observer IntObserver) Subscription {
 	mapper := f.mapper(observer)
-	return f.parent.Subscribe(IntObserverFunc(func(next int, err error, complete bool) {
+	return f.parent.Subscribe(NewIntObserverFunc(func(next int, err error, complete bool) {
 		mapper(next, err, complete, observer)
 	}))
 }
 
-
-
 type MappingInt2StringFunc func(next int, err error, complete bool, observer StringObserver)
-type MappingInt2StringFuncFactory func (observer StringObserver) MappingInt2StringFunc
+type MappingInt2StringFuncFactory func(observer StringObserver) MappingInt2StringFunc
 
 type MappingInt2StringObservable struct {
-	parent  IntObservable
+	parent IntObservable
 	mapper MappingInt2StringFuncFactory
 }
 
 func MapInt2StringObservable(parent IntObservable, mapper MappingInt2StringFuncFactory) StringObservable {
 	return &MappingInt2StringObservable{
-		parent:  parent,
+		parent: parent,
 		mapper: mapper,
 	}
 }
@@ -1194,41 +1250,40 @@ func MapInt2StringObserveDirect(parent IntObservable, mapper MappingInt2StringFu
 
 func MapInt2StringObserveNext(parent IntObservable, mapper func(int) string) StringObservable {
 	return MapInt2StringObservable(parent, func(StringObserver) MappingInt2StringFunc {
-			return func(next int, err error, complete bool, observer StringObserver) {
-				var mapped string
-				if err == nil && !complete {
-					mapped = mapper(next)
-				}
-				PassthroughString(mapped, err, complete, observer)
+		return func(next int, err error, complete bool, observer StringObserver) {
+			var mapped string
+			if err == nil && !complete {
+				mapped = mapper(next)
 			}
-		},
+			PassthroughString(mapped, err, complete, observer)
+		}
+	},
 	)
 }
 
 func (f *MappingInt2StringObservable) Subscribe(observer StringObserver) Subscription {
 	mapper := f.mapper(observer)
-	return f.parent.Subscribe(IntObserverFunc(func(next int, err error, complete bool) {
+	return f.parent.Subscribe(NewIntObserverFunc(func(next int, err error, complete bool) {
 		mapper(next, err, complete, observer)
 	}))
 }
 
-
 // MapString maps this stream to an StringStream via f.
-func (s *IntStream) MapString(f func (int) string) *StringStream {
+func (s *IntStream) MapString(f func(int) string) *StringStream {
 	return FromStringObservable(MapInt2StringObserveNext(s, f))
 }
 
 type MappingInt2Float32Func func(next int, err error, complete bool, observer Float32Observer)
-type MappingInt2Float32FuncFactory func (observer Float32Observer) MappingInt2Float32Func
+type MappingInt2Float32FuncFactory func(observer Float32Observer) MappingInt2Float32Func
 
 type MappingInt2Float32Observable struct {
-	parent  IntObservable
+	parent IntObservable
 	mapper MappingInt2Float32FuncFactory
 }
 
 func MapInt2Float32Observable(parent IntObservable, mapper MappingInt2Float32FuncFactory) Float32Observable {
 	return &MappingInt2Float32Observable{
-		parent:  parent,
+		parent: parent,
 		mapper: mapper,
 	}
 }
@@ -1241,41 +1296,40 @@ func MapInt2Float32ObserveDirect(parent IntObservable, mapper MappingInt2Float32
 
 func MapInt2Float32ObserveNext(parent IntObservable, mapper func(int) float32) Float32Observable {
 	return MapInt2Float32Observable(parent, func(Float32Observer) MappingInt2Float32Func {
-			return func(next int, err error, complete bool, observer Float32Observer) {
-				var mapped float32
-				if err == nil && !complete {
-					mapped = mapper(next)
-				}
-				PassthroughFloat32(mapped, err, complete, observer)
+		return func(next int, err error, complete bool, observer Float32Observer) {
+			var mapped float32
+			if err == nil && !complete {
+				mapped = mapper(next)
 			}
-		},
+			PassthroughFloat32(mapped, err, complete, observer)
+		}
+	},
 	)
 }
 
 func (f *MappingInt2Float32Observable) Subscribe(observer Float32Observer) Subscription {
 	mapper := f.mapper(observer)
-	return f.parent.Subscribe(IntObserverFunc(func(next int, err error, complete bool) {
+	return f.parent.Subscribe(NewIntObserverFunc(func(next int, err error, complete bool) {
 		mapper(next, err, complete, observer)
 	}))
 }
 
-
 // MapFloat32 maps this stream to an Float32Stream via f.
-func (s *IntStream) MapFloat32(f func (int) float32) *Float32Stream {
+func (s *IntStream) MapFloat32(f func(int) float32) *Float32Stream {
 	return FromFloat32Observable(MapInt2Float32ObserveNext(s, f))
 }
 
 type MappingInt2TimeFunc func(next int, err error, complete bool, observer TimeObserver)
-type MappingInt2TimeFuncFactory func (observer TimeObserver) MappingInt2TimeFunc
+type MappingInt2TimeFuncFactory func(observer TimeObserver) MappingInt2TimeFunc
 
 type MappingInt2TimeObservable struct {
-	parent  IntObservable
+	parent IntObservable
 	mapper MappingInt2TimeFuncFactory
 }
 
 func MapInt2TimeObservable(parent IntObservable, mapper MappingInt2TimeFuncFactory) TimeObservable {
 	return &MappingInt2TimeObservable{
-		parent:  parent,
+		parent: parent,
 		mapper: mapper,
 	}
 }
@@ -1288,31 +1342,28 @@ func MapInt2TimeObserveDirect(parent IntObservable, mapper MappingInt2TimeFunc) 
 
 func MapInt2TimeObserveNext(parent IntObservable, mapper func(int) time.Time) TimeObservable {
 	return MapInt2TimeObservable(parent, func(TimeObserver) MappingInt2TimeFunc {
-			return func(next int, err error, complete bool, observer TimeObserver) {
-				var mapped time.Time
-				if err == nil && !complete {
-					mapped = mapper(next)
-				}
-				PassthroughTime(mapped, err, complete, observer)
+		return func(next int, err error, complete bool, observer TimeObserver) {
+			var mapped time.Time
+			if err == nil && !complete {
+				mapped = mapper(next)
 			}
-		},
+			PassthroughTime(mapped, err, complete, observer)
+		}
+	},
 	)
 }
 
 func (f *MappingInt2TimeObservable) Subscribe(observer TimeObserver) Subscription {
 	mapper := f.mapper(observer)
-	return f.parent.Subscribe(IntObserverFunc(func(next int, err error, complete bool) {
+	return f.parent.Subscribe(NewIntObserverFunc(func(next int, err error, complete bool) {
 		mapper(next, err, complete, observer)
 	}))
 }
 
-
 // MapTime maps this stream to an TimeStream via f.
-func (s *IntStream) MapTime(f func (int) time.Time) *TimeStream {
+func (s *IntStream) MapTime(f func(int) time.Time) *TimeStream {
 	return FromTimeObservable(MapInt2TimeObserveNext(s, f))
 }
-
-
 
 type StringObserver interface {
 	Next(string)
@@ -1320,7 +1371,7 @@ type StringObserver interface {
 }
 
 func StringObserverAsGenericObserver(observer StringObserver) GenericObserver {
-	return GenericObserverFunc(func(next interface{}, err error, complete bool) {
+	return NewGenericObserverFunc(func(next interface{}, err error, complete bool) {
 		switch {
 		case err != nil:
 			observer.Error(err)
@@ -1333,7 +1384,7 @@ func StringObserverAsGenericObserver(observer StringObserver) GenericObserver {
 }
 
 func GenericObserverAsStringObserver(observer GenericObserver) StringObserver {
-	return StringObserverFunc(func(next string, err error, complete bool) {
+	return NewStringObserverFunc(func(next string, err error, complete bool) {
 		switch {
 		case err != nil:
 			observer.Error(err)
@@ -1345,7 +1396,7 @@ func GenericObserverAsStringObserver(observer GenericObserver) StringObserver {
 	})
 }
 
-type StringObservableFactory func (observer StringObserver, subscription Subscription)
+type StringObservableFactory func(observer StringObserver, subscription Subscription)
 
 func (f StringObservableFactory) Subscribe(observer StringObserver) Subscription {
 	subscription := NewGenericSubscription()
@@ -1354,13 +1405,13 @@ func (f StringObservableFactory) Subscribe(observer StringObserver) Subscription
 }
 
 // CreateString calls f(observer, subscription) to produce values for a stream.
-func CreateString(f func (observer StringObserver, subscription Subscription)) *StringStream {
+func CreateString(f func(observer StringObserver, subscription Subscription)) *StringStream {
 	return FromStringObservable(StringObservableFactory(f))
 }
 
 // Repeat value count times.
 func RepeatString(value string, count int) *StringStream {
-	return CreateString(func (observer StringObserver, subscription Subscription) {
+	return CreateString(func(observer StringObserver, subscription Subscription) {
 		for i := 0; i < count; i++ {
 			if subscription.Unsubscribed() {
 				return
@@ -1372,8 +1423,8 @@ func RepeatString(value string, count int) *StringStream {
 }
 
 // Start creates an observable with the result of a function call.
-func StartString(f func () string) *StringStream {
-	return CreateString(func (observer StringObserver, subscription Subscription) {
+func StartString(f func() string) *StringStream {
+	return CreateString(func(observer StringObserver, subscription Subscription) {
 		observer.Next(f())
 		observer.Complete()
 	})
@@ -1390,13 +1441,20 @@ func PassthroughString(next string, err error, complete bool, observer StringObs
 	}
 }
 
-type StringObserverFunc func(string, error, bool)
+type StringObserverFunc struct {
+	f func(string, error, bool)
+	Subscription
+}
 
 var zeroString = *new(string)
 
-func (f StringObserverFunc) Next(next string) { f(next, nil, false) }
-func (f StringObserverFunc) Error(err error)  { f(zeroString, err, false) }
-func (f StringObserverFunc) Complete()        { f(zeroString, nil, true) }
+func NewStringObserverFunc(f func(string, error, bool)) *StringObserverFunc {
+	return &StringObserverFunc{f, NewGenericSubscription()}
+}
+
+func (f StringObserverFunc) Next(next string) { f.f(next, nil, false) }
+func (f StringObserverFunc) Error(err error)  { f.f(zeroString, err, false) }
+func (f StringObserverFunc) Complete()        { f.f(zeroString, nil, true) }
 
 type StringObservable interface {
 	Subscribe(StringObserver) Subscription
@@ -1405,33 +1463,33 @@ type StringObservable interface {
 // Convert a GenericObservableFilter to a StringObservable
 func (f GenericObservableFilterFactory) String(parent StringObservable) StringObservable {
 	return MapString2StringObservable(parent, func(observer StringObserver) MappingString2StringFunc {
-			gobserver := StringObserverAsGenericObserver(observer)
-			filter := f(gobserver)
-			return func(next string, err error, complete bool, observer StringObserver) {
-				filter(next, err, complete, gobserver)
-			}
-		},
+		gobserver := StringObserverAsGenericObserver(observer)
+		filter := f(gobserver)
+		return func(next string, err error, complete bool, observer StringObserver) {
+			filter(next, err, complete, gobserver)
+		}
+	},
 	)
 }
 
 func NeverString() *StringStream {
-	return CreateString(func (observer StringObserver, subscription Subscription) {})
+	return CreateString(func(observer StringObserver, subscription Subscription) {})
 }
 
 func EmptyString() *StringStream {
-	return CreateString(func (observer StringObserver, subscription Subscription) {
+	return CreateString(func(observer StringObserver, subscription Subscription) {
 		observer.Complete()
 	})
 }
 
 func ThrowString(err error) *StringStream {
-	return CreateString(func (observer StringObserver, subscription Subscription) {
+	return CreateString(func(observer StringObserver, subscription Subscription) {
 		observer.Error(err)
 	})
 }
 
 func FromStringArray(array []string) *StringStream {
-	return CreateString(func (observer StringObserver, subscription Subscription) {
+	return CreateString(func(observer StringObserver, subscription Subscription) {
 		for _, v := range array {
 			if subscription.Unsubscribed() {
 				return
@@ -1439,7 +1497,7 @@ func FromStringArray(array []string) *StringStream {
 			observer.Next(v)
 		}
 		observer.Complete()
-		subscription.Unsubscribe()
+		subscription.Close()
 	})
 }
 
@@ -1452,7 +1510,7 @@ func JustString(element string) *StringStream {
 }
 
 func FromStringChannel(ch <-chan string) *StringStream {
-	return CreateString(func (observer StringObserver, subscription Subscription) {
+	return CreateString(func(observer StringObserver, subscription Subscription) {
 		for v := range ch {
 			if subscription.Unsubscribed() {
 				return
@@ -1471,12 +1529,12 @@ func FromStringObservable(observable StringObservable) *StringStream {
 	return &StringStream{observable}
 }
 
-func (s *StringStream) SubscribeFunc(f StringObserverFunc) Subscription {
-	return s.Subscribe(f)
+func (s *StringStream) SubscribeFunc(f func(string, error, bool)) Subscription {
+	return s.Subscribe(NewStringObserverFunc(f))
 }
 
-func (s *StringStream) SubscribeNext(f func (v string)) Subscription {
-	return s.SubscribeFunc(func (next string, err error, complete bool) {
+func (s *StringStream) SubscribeNext(f func(v string)) Subscription {
+	return s.SubscribeFunc(func(next string, err error, complete bool) {
 		if err == nil && !complete {
 			f(next)
 		}
@@ -1588,7 +1646,7 @@ func (c *concatStringObserver) concat(next string, err error, complete bool) {
 			c.observer.Complete()
 			return
 		}
-		c.observables[c.observable].Subscribe(StringObserverFunc(c.concat))
+		c.observables[c.observable].Subscribe(NewStringObserverFunc(c.concat))
 	default:
 		c.observer.Next(next)
 	}
@@ -1602,15 +1660,15 @@ func (m *concatStringObservable) Subscribe(observer StringObserver) Subscription
 		observables:  m.observables,
 	}
 	if len(m.observables) > 0 {
-		m.observables[0].Subscribe(StringObserverFunc(concatObserver.concat))
+		m.observables[0].Subscribe(NewStringObserverFunc(concatObserver.concat))
 	} else {
-		subscription.Unsubscribe()
+		subscription.Close()
 	}
 	return subscription
 }
 
-func (s *StringStream) Concat(observables ... StringObservable) *StringStream {
-	return &StringStream{&concatStringObservable{append([]StringObservable{s}, observables...)} }
+func (s *StringStream) Concat(observables ...StringObservable) *StringStream {
+	return &StringStream{&concatStringObservable{append([]StringObservable{s}, observables...)}}
 }
 
 type mergeStringObservable struct {
@@ -1643,19 +1701,19 @@ func (m *mergeStringObservable) Subscribe(observer StringObserver) Subscription 
 		}
 	}
 	for _, observable := range m.observables {
-		observable.Subscribe(StringObserverFunc(relay))
+		observable.Subscribe(NewStringObserverFunc(relay))
 	}
 	return subscription
 }
 
 // Merge an arbitrary
-func (s *StringStream) Merge(other ... StringObservable) *StringStream {
-	return &StringStream{&mergeStringObservable{ append(other, s) } }
+func (s *StringStream) Merge(other ...StringObservable) *StringStream {
+	return &StringStream{&mergeStringObservable{append(other, s)}}
 }
 
 type catchStringObservable struct {
 	parent StringObservable
-	catch StringObservable
+	catch  StringObservable
 }
 
 func (r *catchStringObservable) Subscribe(observer StringObserver) Subscription {
@@ -1670,12 +1728,12 @@ func (r *catchStringObservable) Subscribe(observer StringObserver) Subscription 
 			observer.Next(next)
 		}
 	}
-	r.parent.Subscribe(StringObserverFunc(run))
+	r.parent.Subscribe(NewStringObserverFunc(run))
 	return subscription
 }
 
 func (s *StringStream) Catch(catch StringObservable) *StringStream {
-	return &StringStream{ &catchStringObservable{s, catch} }
+	return &StringStream{&catchStringObservable{s, catch}}
 }
 
 type retryStringObservable struct {
@@ -1684,13 +1742,13 @@ type retryStringObservable struct {
 
 type retryStringObserver struct {
 	observable StringObservable
-	observer StringObserver
+	observer   StringObserver
 }
 
 func (r *retryStringObserver) retry(next string, err error, complete bool) {
 	switch {
 	case err != nil:
-		r.observable.Subscribe(StringObserverFunc(r.retry))
+		r.observable.Subscribe(NewStringObserverFunc(r.retry))
 	case complete:
 		r.observer.Complete()
 	default:
@@ -1701,12 +1759,12 @@ func (r *retryStringObserver) retry(next string, err error, complete bool) {
 func (r *retryStringObservable) Subscribe(observer StringObserver) Subscription {
 	subscription := NewGenericSubscription()
 	ro := &retryStringObserver{r.observable, observer}
-	r.observable.Subscribe(StringObserverFunc(ro.retry))
+	r.observable.Subscribe(NewStringObserverFunc(ro.retry))
 	return subscription
 }
 
 func (s *StringStream) Retry() *StringStream {
-	return &StringStream{ &retryStringObservable{s} }
+	return &StringStream{&retryStringObservable{s}}
 }
 
 // Do applies a function for each value passing through the stream.
@@ -1737,7 +1795,7 @@ func (s *StringStream) DoOnComplete(f func()) *StringStream {
 	}))
 }
 
-func (s *StringStream) Reduce(initial string, reducer func (string, string) string) *StringStream {
+func (s *StringStream) Reduce(initial string, reducer func(string, string) string) *StringStream {
 	value := initial
 	return FromStringObservable(MapString2StringObserveDirect(s, func(next string, err error, complete bool, observer StringObserver) {
 		switch {
@@ -1753,7 +1811,7 @@ func (s *StringStream) Reduce(initial string, reducer func (string, string) stri
 	}))
 }
 
-func (s *StringStream) Scan(initial string, f func (string, string) string) *StringStream {
+func (s *StringStream) Scan(initial string, f func(string, string) string) *StringStream {
 	value := initial
 	return FromStringObservable(MapString2StringObserveDirect(s, func(next string, err error, complete bool, observer StringObserver) {
 		switch {
@@ -1772,7 +1830,7 @@ func (s *StringStream) Scan(initial string, f func (string, string) string) *Str
 func (s *StringStream) ToOneWithError() (string, error) {
 	valuech := make(chan string, 1)
 	errch := make(chan error, 1)
-	FromStringObservable(oneFilter().String(s)).SubscribeFunc(func (next string, err error, complete bool) {
+	FromStringObservable(oneFilter().String(s)).SubscribeFunc(func(next string, err error, complete bool) {
 		if err != nil {
 			errch <- err
 		} else if !complete {
@@ -1833,6 +1891,7 @@ func (s *StringStream) ToChannelWithError() (<-chan string, <-chan error) {
 		case err != nil:
 			errch <- err
 			close(errch)
+			close(ch)
 		case complete:
 			close(ch)
 		default:
@@ -1864,18 +1923,17 @@ func (s *StringStream) Count() *IntStream {
 	}))
 }
 
-
 type MappingString2IntFunc func(next string, err error, complete bool, observer IntObserver)
-type MappingString2IntFuncFactory func (observer IntObserver) MappingString2IntFunc
+type MappingString2IntFuncFactory func(observer IntObserver) MappingString2IntFunc
 
 type MappingString2IntObservable struct {
-	parent  StringObservable
+	parent StringObservable
 	mapper MappingString2IntFuncFactory
 }
 
 func MapString2IntObservable(parent StringObservable, mapper MappingString2IntFuncFactory) IntObservable {
 	return &MappingString2IntObservable{
-		parent:  parent,
+		parent: parent,
 		mapper: mapper,
 	}
 }
@@ -1888,41 +1946,40 @@ func MapString2IntObserveDirect(parent StringObservable, mapper MappingString2In
 
 func MapString2IntObserveNext(parent StringObservable, mapper func(string) int) IntObservable {
 	return MapString2IntObservable(parent, func(IntObserver) MappingString2IntFunc {
-			return func(next string, err error, complete bool, observer IntObserver) {
-				var mapped int
-				if err == nil && !complete {
-					mapped = mapper(next)
-				}
-				PassthroughInt(mapped, err, complete, observer)
+		return func(next string, err error, complete bool, observer IntObserver) {
+			var mapped int
+			if err == nil && !complete {
+				mapped = mapper(next)
 			}
-		},
+			PassthroughInt(mapped, err, complete, observer)
+		}
+	},
 	)
 }
 
 func (f *MappingString2IntObservable) Subscribe(observer IntObserver) Subscription {
 	mapper := f.mapper(observer)
-	return f.parent.Subscribe(StringObserverFunc(func(next string, err error, complete bool) {
+	return f.parent.Subscribe(NewStringObserverFunc(func(next string, err error, complete bool) {
 		mapper(next, err, complete, observer)
 	}))
 }
 
-
 // MapInt maps this stream to an IntStream via f.
-func (s *StringStream) MapInt(f func (string) int) *IntStream {
+func (s *StringStream) MapInt(f func(string) int) *IntStream {
 	return FromIntObservable(MapString2IntObserveNext(s, f))
 }
 
 type MappingString2StringFunc func(next string, err error, complete bool, observer StringObserver)
-type MappingString2StringFuncFactory func (observer StringObserver) MappingString2StringFunc
+type MappingString2StringFuncFactory func(observer StringObserver) MappingString2StringFunc
 
 type MappingString2StringObservable struct {
-	parent  StringObservable
+	parent StringObservable
 	mapper MappingString2StringFuncFactory
 }
 
 func MapString2StringObservable(parent StringObservable, mapper MappingString2StringFuncFactory) StringObservable {
 	return &MappingString2StringObservable{
-		parent:  parent,
+		parent: parent,
 		mapper: mapper,
 	}
 }
@@ -1935,37 +1992,35 @@ func MapString2StringObserveDirect(parent StringObservable, mapper MappingString
 
 func MapString2StringObserveNext(parent StringObservable, mapper func(string) string) StringObservable {
 	return MapString2StringObservable(parent, func(StringObserver) MappingString2StringFunc {
-			return func(next string, err error, complete bool, observer StringObserver) {
-				var mapped string
-				if err == nil && !complete {
-					mapped = mapper(next)
-				}
-				PassthroughString(mapped, err, complete, observer)
+		return func(next string, err error, complete bool, observer StringObserver) {
+			var mapped string
+			if err == nil && !complete {
+				mapped = mapper(next)
 			}
-		},
+			PassthroughString(mapped, err, complete, observer)
+		}
+	},
 	)
 }
 
 func (f *MappingString2StringObservable) Subscribe(observer StringObserver) Subscription {
 	mapper := f.mapper(observer)
-	return f.parent.Subscribe(StringObserverFunc(func(next string, err error, complete bool) {
+	return f.parent.Subscribe(NewStringObserverFunc(func(next string, err error, complete bool) {
 		mapper(next, err, complete, observer)
 	}))
 }
 
-
-
 type MappingString2Float32Func func(next string, err error, complete bool, observer Float32Observer)
-type MappingString2Float32FuncFactory func (observer Float32Observer) MappingString2Float32Func
+type MappingString2Float32FuncFactory func(observer Float32Observer) MappingString2Float32Func
 
 type MappingString2Float32Observable struct {
-	parent  StringObservable
+	parent StringObservable
 	mapper MappingString2Float32FuncFactory
 }
 
 func MapString2Float32Observable(parent StringObservable, mapper MappingString2Float32FuncFactory) Float32Observable {
 	return &MappingString2Float32Observable{
-		parent:  parent,
+		parent: parent,
 		mapper: mapper,
 	}
 }
@@ -1978,41 +2033,40 @@ func MapString2Float32ObserveDirect(parent StringObservable, mapper MappingStrin
 
 func MapString2Float32ObserveNext(parent StringObservable, mapper func(string) float32) Float32Observable {
 	return MapString2Float32Observable(parent, func(Float32Observer) MappingString2Float32Func {
-			return func(next string, err error, complete bool, observer Float32Observer) {
-				var mapped float32
-				if err == nil && !complete {
-					mapped = mapper(next)
-				}
-				PassthroughFloat32(mapped, err, complete, observer)
+		return func(next string, err error, complete bool, observer Float32Observer) {
+			var mapped float32
+			if err == nil && !complete {
+				mapped = mapper(next)
 			}
-		},
+			PassthroughFloat32(mapped, err, complete, observer)
+		}
+	},
 	)
 }
 
 func (f *MappingString2Float32Observable) Subscribe(observer Float32Observer) Subscription {
 	mapper := f.mapper(observer)
-	return f.parent.Subscribe(StringObserverFunc(func(next string, err error, complete bool) {
+	return f.parent.Subscribe(NewStringObserverFunc(func(next string, err error, complete bool) {
 		mapper(next, err, complete, observer)
 	}))
 }
 
-
 // MapFloat32 maps this stream to an Float32Stream via f.
-func (s *StringStream) MapFloat32(f func (string) float32) *Float32Stream {
+func (s *StringStream) MapFloat32(f func(string) float32) *Float32Stream {
 	return FromFloat32Observable(MapString2Float32ObserveNext(s, f))
 }
 
 type MappingString2TimeFunc func(next string, err error, complete bool, observer TimeObserver)
-type MappingString2TimeFuncFactory func (observer TimeObserver) MappingString2TimeFunc
+type MappingString2TimeFuncFactory func(observer TimeObserver) MappingString2TimeFunc
 
 type MappingString2TimeObservable struct {
-	parent  StringObservable
+	parent StringObservable
 	mapper MappingString2TimeFuncFactory
 }
 
 func MapString2TimeObservable(parent StringObservable, mapper MappingString2TimeFuncFactory) TimeObservable {
 	return &MappingString2TimeObservable{
-		parent:  parent,
+		parent: parent,
 		mapper: mapper,
 	}
 }
@@ -2025,31 +2079,28 @@ func MapString2TimeObserveDirect(parent StringObservable, mapper MappingString2T
 
 func MapString2TimeObserveNext(parent StringObservable, mapper func(string) time.Time) TimeObservable {
 	return MapString2TimeObservable(parent, func(TimeObserver) MappingString2TimeFunc {
-			return func(next string, err error, complete bool, observer TimeObserver) {
-				var mapped time.Time
-				if err == nil && !complete {
-					mapped = mapper(next)
-				}
-				PassthroughTime(mapped, err, complete, observer)
+		return func(next string, err error, complete bool, observer TimeObserver) {
+			var mapped time.Time
+			if err == nil && !complete {
+				mapped = mapper(next)
 			}
-		},
+			PassthroughTime(mapped, err, complete, observer)
+		}
+	},
 	)
 }
 
 func (f *MappingString2TimeObservable) Subscribe(observer TimeObserver) Subscription {
 	mapper := f.mapper(observer)
-	return f.parent.Subscribe(StringObserverFunc(func(next string, err error, complete bool) {
+	return f.parent.Subscribe(NewStringObserverFunc(func(next string, err error, complete bool) {
 		mapper(next, err, complete, observer)
 	}))
 }
 
-
 // MapTime maps this stream to an TimeStream via f.
-func (s *StringStream) MapTime(f func (string) time.Time) *TimeStream {
+func (s *StringStream) MapTime(f func(string) time.Time) *TimeStream {
 	return FromTimeObservable(MapString2TimeObserveNext(s, f))
 }
-
-
 
 type Float32Observer interface {
 	Next(float32)
@@ -2057,7 +2108,7 @@ type Float32Observer interface {
 }
 
 func Float32ObserverAsGenericObserver(observer Float32Observer) GenericObserver {
-	return GenericObserverFunc(func(next interface{}, err error, complete bool) {
+	return NewGenericObserverFunc(func(next interface{}, err error, complete bool) {
 		switch {
 		case err != nil:
 			observer.Error(err)
@@ -2070,7 +2121,7 @@ func Float32ObserverAsGenericObserver(observer Float32Observer) GenericObserver 
 }
 
 func GenericObserverAsFloat32Observer(observer GenericObserver) Float32Observer {
-	return Float32ObserverFunc(func(next float32, err error, complete bool) {
+	return NewFloat32ObserverFunc(func(next float32, err error, complete bool) {
 		switch {
 		case err != nil:
 			observer.Error(err)
@@ -2082,7 +2133,7 @@ func GenericObserverAsFloat32Observer(observer GenericObserver) Float32Observer 
 	})
 }
 
-type Float32ObservableFactory func (observer Float32Observer, subscription Subscription)
+type Float32ObservableFactory func(observer Float32Observer, subscription Subscription)
 
 func (f Float32ObservableFactory) Subscribe(observer Float32Observer) Subscription {
 	subscription := NewGenericSubscription()
@@ -2091,13 +2142,13 @@ func (f Float32ObservableFactory) Subscribe(observer Float32Observer) Subscripti
 }
 
 // CreateFloat32 calls f(observer, subscription) to produce values for a stream.
-func CreateFloat32(f func (observer Float32Observer, subscription Subscription)) *Float32Stream {
+func CreateFloat32(f func(observer Float32Observer, subscription Subscription)) *Float32Stream {
 	return FromFloat32Observable(Float32ObservableFactory(f))
 }
 
 // Repeat value count times.
 func RepeatFloat32(value float32, count int) *Float32Stream {
-	return CreateFloat32(func (observer Float32Observer, subscription Subscription) {
+	return CreateFloat32(func(observer Float32Observer, subscription Subscription) {
 		for i := 0; i < count; i++ {
 			if subscription.Unsubscribed() {
 				return
@@ -2109,8 +2160,8 @@ func RepeatFloat32(value float32, count int) *Float32Stream {
 }
 
 // Start creates an observable with the result of a function call.
-func StartFloat32(f func () float32) *Float32Stream {
-	return CreateFloat32(func (observer Float32Observer, subscription Subscription) {
+func StartFloat32(f func() float32) *Float32Stream {
+	return CreateFloat32(func(observer Float32Observer, subscription Subscription) {
 		observer.Next(f())
 		observer.Complete()
 	})
@@ -2127,13 +2178,20 @@ func PassthroughFloat32(next float32, err error, complete bool, observer Float32
 	}
 }
 
-type Float32ObserverFunc func(float32, error, bool)
+type Float32ObserverFunc struct {
+	f func(float32, error, bool)
+	Subscription
+}
 
 var zeroFloat32 = *new(float32)
 
-func (f Float32ObserverFunc) Next(next float32) { f(next, nil, false) }
-func (f Float32ObserverFunc) Error(err error)  { f(zeroFloat32, err, false) }
-func (f Float32ObserverFunc) Complete()        { f(zeroFloat32, nil, true) }
+func NewFloat32ObserverFunc(f func(float32, error, bool)) *Float32ObserverFunc {
+	return &Float32ObserverFunc{f, NewGenericSubscription()}
+}
+
+func (f Float32ObserverFunc) Next(next float32) { f.f(next, nil, false) }
+func (f Float32ObserverFunc) Error(err error)   { f.f(zeroFloat32, err, false) }
+func (f Float32ObserverFunc) Complete()         { f.f(zeroFloat32, nil, true) }
 
 type Float32Observable interface {
 	Subscribe(Float32Observer) Subscription
@@ -2142,33 +2200,33 @@ type Float32Observable interface {
 // Convert a GenericObservableFilter to a Float32Observable
 func (f GenericObservableFilterFactory) Float32(parent Float32Observable) Float32Observable {
 	return MapFloat322Float32Observable(parent, func(observer Float32Observer) MappingFloat322Float32Func {
-			gobserver := Float32ObserverAsGenericObserver(observer)
-			filter := f(gobserver)
-			return func(next float32, err error, complete bool, observer Float32Observer) {
-				filter(next, err, complete, gobserver)
-			}
-		},
+		gobserver := Float32ObserverAsGenericObserver(observer)
+		filter := f(gobserver)
+		return func(next float32, err error, complete bool, observer Float32Observer) {
+			filter(next, err, complete, gobserver)
+		}
+	},
 	)
 }
 
 func NeverFloat32() *Float32Stream {
-	return CreateFloat32(func (observer Float32Observer, subscription Subscription) {})
+	return CreateFloat32(func(observer Float32Observer, subscription Subscription) {})
 }
 
 func EmptyFloat32() *Float32Stream {
-	return CreateFloat32(func (observer Float32Observer, subscription Subscription) {
+	return CreateFloat32(func(observer Float32Observer, subscription Subscription) {
 		observer.Complete()
 	})
 }
 
 func ThrowFloat32(err error) *Float32Stream {
-	return CreateFloat32(func (observer Float32Observer, subscription Subscription) {
+	return CreateFloat32(func(observer Float32Observer, subscription Subscription) {
 		observer.Error(err)
 	})
 }
 
 func FromFloat32Array(array []float32) *Float32Stream {
-	return CreateFloat32(func (observer Float32Observer, subscription Subscription) {
+	return CreateFloat32(func(observer Float32Observer, subscription Subscription) {
 		for _, v := range array {
 			if subscription.Unsubscribed() {
 				return
@@ -2176,7 +2234,7 @@ func FromFloat32Array(array []float32) *Float32Stream {
 			observer.Next(v)
 		}
 		observer.Complete()
-		subscription.Unsubscribe()
+		subscription.Close()
 	})
 }
 
@@ -2189,7 +2247,7 @@ func JustFloat32(element float32) *Float32Stream {
 }
 
 func FromFloat32Channel(ch <-chan float32) *Float32Stream {
-	return CreateFloat32(func (observer Float32Observer, subscription Subscription) {
+	return CreateFloat32(func(observer Float32Observer, subscription Subscription) {
 		for v := range ch {
 			if subscription.Unsubscribed() {
 				return
@@ -2208,12 +2266,12 @@ func FromFloat32Observable(observable Float32Observable) *Float32Stream {
 	return &Float32Stream{observable}
 }
 
-func (s *Float32Stream) SubscribeFunc(f Float32ObserverFunc) Subscription {
-	return s.Subscribe(f)
+func (s *Float32Stream) SubscribeFunc(f func(float32, error, bool)) Subscription {
+	return s.Subscribe(NewFloat32ObserverFunc(f))
 }
 
-func (s *Float32Stream) SubscribeNext(f func (v float32)) Subscription {
-	return s.SubscribeFunc(func (next float32, err error, complete bool) {
+func (s *Float32Stream) SubscribeNext(f func(v float32)) Subscription {
+	return s.SubscribeFunc(func(next float32, err error, complete bool) {
 		if err == nil && !complete {
 			f(next)
 		}
@@ -2325,7 +2383,7 @@ func (c *concatFloat32Observer) concat(next float32, err error, complete bool) {
 			c.observer.Complete()
 			return
 		}
-		c.observables[c.observable].Subscribe(Float32ObserverFunc(c.concat))
+		c.observables[c.observable].Subscribe(NewFloat32ObserverFunc(c.concat))
 	default:
 		c.observer.Next(next)
 	}
@@ -2339,15 +2397,15 @@ func (m *concatFloat32Observable) Subscribe(observer Float32Observer) Subscripti
 		observables:  m.observables,
 	}
 	if len(m.observables) > 0 {
-		m.observables[0].Subscribe(Float32ObserverFunc(concatObserver.concat))
+		m.observables[0].Subscribe(NewFloat32ObserverFunc(concatObserver.concat))
 	} else {
-		subscription.Unsubscribe()
+		subscription.Close()
 	}
 	return subscription
 }
 
-func (s *Float32Stream) Concat(observables ... Float32Observable) *Float32Stream {
-	return &Float32Stream{&concatFloat32Observable{append([]Float32Observable{s}, observables...)} }
+func (s *Float32Stream) Concat(observables ...Float32Observable) *Float32Stream {
+	return &Float32Stream{&concatFloat32Observable{append([]Float32Observable{s}, observables...)}}
 }
 
 type mergeFloat32Observable struct {
@@ -2380,19 +2438,19 @@ func (m *mergeFloat32Observable) Subscribe(observer Float32Observer) Subscriptio
 		}
 	}
 	for _, observable := range m.observables {
-		observable.Subscribe(Float32ObserverFunc(relay))
+		observable.Subscribe(NewFloat32ObserverFunc(relay))
 	}
 	return subscription
 }
 
 // Merge an arbitrary
-func (s *Float32Stream) Merge(other ... Float32Observable) *Float32Stream {
-	return &Float32Stream{&mergeFloat32Observable{ append(other, s) } }
+func (s *Float32Stream) Merge(other ...Float32Observable) *Float32Stream {
+	return &Float32Stream{&mergeFloat32Observable{append(other, s)}}
 }
 
 type catchFloat32Observable struct {
 	parent Float32Observable
-	catch Float32Observable
+	catch  Float32Observable
 }
 
 func (r *catchFloat32Observable) Subscribe(observer Float32Observer) Subscription {
@@ -2407,12 +2465,12 @@ func (r *catchFloat32Observable) Subscribe(observer Float32Observer) Subscriptio
 			observer.Next(next)
 		}
 	}
-	r.parent.Subscribe(Float32ObserverFunc(run))
+	r.parent.Subscribe(NewFloat32ObserverFunc(run))
 	return subscription
 }
 
 func (s *Float32Stream) Catch(catch Float32Observable) *Float32Stream {
-	return &Float32Stream{ &catchFloat32Observable{s, catch} }
+	return &Float32Stream{&catchFloat32Observable{s, catch}}
 }
 
 type retryFloat32Observable struct {
@@ -2421,13 +2479,13 @@ type retryFloat32Observable struct {
 
 type retryFloat32Observer struct {
 	observable Float32Observable
-	observer Float32Observer
+	observer   Float32Observer
 }
 
 func (r *retryFloat32Observer) retry(next float32, err error, complete bool) {
 	switch {
 	case err != nil:
-		r.observable.Subscribe(Float32ObserverFunc(r.retry))
+		r.observable.Subscribe(NewFloat32ObserverFunc(r.retry))
 	case complete:
 		r.observer.Complete()
 	default:
@@ -2438,12 +2496,12 @@ func (r *retryFloat32Observer) retry(next float32, err error, complete bool) {
 func (r *retryFloat32Observable) Subscribe(observer Float32Observer) Subscription {
 	subscription := NewGenericSubscription()
 	ro := &retryFloat32Observer{r.observable, observer}
-	r.observable.Subscribe(Float32ObserverFunc(ro.retry))
+	r.observable.Subscribe(NewFloat32ObserverFunc(ro.retry))
 	return subscription
 }
 
 func (s *Float32Stream) Retry() *Float32Stream {
-	return &Float32Stream{ &retryFloat32Observable{s} }
+	return &Float32Stream{&retryFloat32Observable{s}}
 }
 
 // Do applies a function for each value passing through the stream.
@@ -2474,7 +2532,7 @@ func (s *Float32Stream) DoOnComplete(f func()) *Float32Stream {
 	}))
 }
 
-func (s *Float32Stream) Reduce(initial float32, reducer func (float32, float32) float32) *Float32Stream {
+func (s *Float32Stream) Reduce(initial float32, reducer func(float32, float32) float32) *Float32Stream {
 	value := initial
 	return FromFloat32Observable(MapFloat322Float32ObserveDirect(s, func(next float32, err error, complete bool, observer Float32Observer) {
 		switch {
@@ -2490,7 +2548,7 @@ func (s *Float32Stream) Reduce(initial float32, reducer func (float32, float32) 
 	}))
 }
 
-func (s *Float32Stream) Scan(initial float32, f func (float32, float32) float32) *Float32Stream {
+func (s *Float32Stream) Scan(initial float32, f func(float32, float32) float32) *Float32Stream {
 	value := initial
 	return FromFloat32Observable(MapFloat322Float32ObserveDirect(s, func(next float32, err error, complete bool, observer Float32Observer) {
 		switch {
@@ -2509,7 +2567,7 @@ func (s *Float32Stream) Scan(initial float32, f func (float32, float32) float32)
 func (s *Float32Stream) ToOneWithError() (float32, error) {
 	valuech := make(chan float32, 1)
 	errch := make(chan error, 1)
-	FromFloat32Observable(oneFilter().Float32(s)).SubscribeFunc(func (next float32, err error, complete bool) {
+	FromFloat32Observable(oneFilter().Float32(s)).SubscribeFunc(func(next float32, err error, complete bool) {
 		if err != nil {
 			errch <- err
 		} else if !complete {
@@ -2570,6 +2628,7 @@ func (s *Float32Stream) ToChannelWithError() (<-chan float32, <-chan error) {
 		case err != nil:
 			errch <- err
 			close(errch)
+			close(ch)
 		case complete:
 			close(ch)
 		default:
@@ -2692,16 +2751,16 @@ func (s *Float32Stream) Max() *Float32Stream {
 }
 
 type MappingFloat322IntFunc func(next float32, err error, complete bool, observer IntObserver)
-type MappingFloat322IntFuncFactory func (observer IntObserver) MappingFloat322IntFunc
+type MappingFloat322IntFuncFactory func(observer IntObserver) MappingFloat322IntFunc
 
 type MappingFloat322IntObservable struct {
-	parent  Float32Observable
+	parent Float32Observable
 	mapper MappingFloat322IntFuncFactory
 }
 
 func MapFloat322IntObservable(parent Float32Observable, mapper MappingFloat322IntFuncFactory) IntObservable {
 	return &MappingFloat322IntObservable{
-		parent:  parent,
+		parent: parent,
 		mapper: mapper,
 	}
 }
@@ -2714,41 +2773,40 @@ func MapFloat322IntObserveDirect(parent Float32Observable, mapper MappingFloat32
 
 func MapFloat322IntObserveNext(parent Float32Observable, mapper func(float32) int) IntObservable {
 	return MapFloat322IntObservable(parent, func(IntObserver) MappingFloat322IntFunc {
-			return func(next float32, err error, complete bool, observer IntObserver) {
-				var mapped int
-				if err == nil && !complete {
-					mapped = mapper(next)
-				}
-				PassthroughInt(mapped, err, complete, observer)
+		return func(next float32, err error, complete bool, observer IntObserver) {
+			var mapped int
+			if err == nil && !complete {
+				mapped = mapper(next)
 			}
-		},
+			PassthroughInt(mapped, err, complete, observer)
+		}
+	},
 	)
 }
 
 func (f *MappingFloat322IntObservable) Subscribe(observer IntObserver) Subscription {
 	mapper := f.mapper(observer)
-	return f.parent.Subscribe(Float32ObserverFunc(func(next float32, err error, complete bool) {
+	return f.parent.Subscribe(NewFloat32ObserverFunc(func(next float32, err error, complete bool) {
 		mapper(next, err, complete, observer)
 	}))
 }
 
-
 // MapInt maps this stream to an IntStream via f.
-func (s *Float32Stream) MapInt(f func (float32) int) *IntStream {
+func (s *Float32Stream) MapInt(f func(float32) int) *IntStream {
 	return FromIntObservable(MapFloat322IntObserveNext(s, f))
 }
 
 type MappingFloat322StringFunc func(next float32, err error, complete bool, observer StringObserver)
-type MappingFloat322StringFuncFactory func (observer StringObserver) MappingFloat322StringFunc
+type MappingFloat322StringFuncFactory func(observer StringObserver) MappingFloat322StringFunc
 
 type MappingFloat322StringObservable struct {
-	parent  Float32Observable
+	parent Float32Observable
 	mapper MappingFloat322StringFuncFactory
 }
 
 func MapFloat322StringObservable(parent Float32Observable, mapper MappingFloat322StringFuncFactory) StringObservable {
 	return &MappingFloat322StringObservable{
-		parent:  parent,
+		parent: parent,
 		mapper: mapper,
 	}
 }
@@ -2761,41 +2819,40 @@ func MapFloat322StringObserveDirect(parent Float32Observable, mapper MappingFloa
 
 func MapFloat322StringObserveNext(parent Float32Observable, mapper func(float32) string) StringObservable {
 	return MapFloat322StringObservable(parent, func(StringObserver) MappingFloat322StringFunc {
-			return func(next float32, err error, complete bool, observer StringObserver) {
-				var mapped string
-				if err == nil && !complete {
-					mapped = mapper(next)
-				}
-				PassthroughString(mapped, err, complete, observer)
+		return func(next float32, err error, complete bool, observer StringObserver) {
+			var mapped string
+			if err == nil && !complete {
+				mapped = mapper(next)
 			}
-		},
+			PassthroughString(mapped, err, complete, observer)
+		}
+	},
 	)
 }
 
 func (f *MappingFloat322StringObservable) Subscribe(observer StringObserver) Subscription {
 	mapper := f.mapper(observer)
-	return f.parent.Subscribe(Float32ObserverFunc(func(next float32, err error, complete bool) {
+	return f.parent.Subscribe(NewFloat32ObserverFunc(func(next float32, err error, complete bool) {
 		mapper(next, err, complete, observer)
 	}))
 }
 
-
 // MapString maps this stream to an StringStream via f.
-func (s *Float32Stream) MapString(f func (float32) string) *StringStream {
+func (s *Float32Stream) MapString(f func(float32) string) *StringStream {
 	return FromStringObservable(MapFloat322StringObserveNext(s, f))
 }
 
 type MappingFloat322Float32Func func(next float32, err error, complete bool, observer Float32Observer)
-type MappingFloat322Float32FuncFactory func (observer Float32Observer) MappingFloat322Float32Func
+type MappingFloat322Float32FuncFactory func(observer Float32Observer) MappingFloat322Float32Func
 
 type MappingFloat322Float32Observable struct {
-	parent  Float32Observable
+	parent Float32Observable
 	mapper MappingFloat322Float32FuncFactory
 }
 
 func MapFloat322Float32Observable(parent Float32Observable, mapper MappingFloat322Float32FuncFactory) Float32Observable {
 	return &MappingFloat322Float32Observable{
-		parent:  parent,
+		parent: parent,
 		mapper: mapper,
 	}
 }
@@ -2808,37 +2865,35 @@ func MapFloat322Float32ObserveDirect(parent Float32Observable, mapper MappingFlo
 
 func MapFloat322Float32ObserveNext(parent Float32Observable, mapper func(float32) float32) Float32Observable {
 	return MapFloat322Float32Observable(parent, func(Float32Observer) MappingFloat322Float32Func {
-			return func(next float32, err error, complete bool, observer Float32Observer) {
-				var mapped float32
-				if err == nil && !complete {
-					mapped = mapper(next)
-				}
-				PassthroughFloat32(mapped, err, complete, observer)
+		return func(next float32, err error, complete bool, observer Float32Observer) {
+			var mapped float32
+			if err == nil && !complete {
+				mapped = mapper(next)
 			}
-		},
+			PassthroughFloat32(mapped, err, complete, observer)
+		}
+	},
 	)
 }
 
 func (f *MappingFloat322Float32Observable) Subscribe(observer Float32Observer) Subscription {
 	mapper := f.mapper(observer)
-	return f.parent.Subscribe(Float32ObserverFunc(func(next float32, err error, complete bool) {
+	return f.parent.Subscribe(NewFloat32ObserverFunc(func(next float32, err error, complete bool) {
 		mapper(next, err, complete, observer)
 	}))
 }
 
-
-
 type MappingFloat322TimeFunc func(next float32, err error, complete bool, observer TimeObserver)
-type MappingFloat322TimeFuncFactory func (observer TimeObserver) MappingFloat322TimeFunc
+type MappingFloat322TimeFuncFactory func(observer TimeObserver) MappingFloat322TimeFunc
 
 type MappingFloat322TimeObservable struct {
-	parent  Float32Observable
+	parent Float32Observable
 	mapper MappingFloat322TimeFuncFactory
 }
 
 func MapFloat322TimeObservable(parent Float32Observable, mapper MappingFloat322TimeFuncFactory) TimeObservable {
 	return &MappingFloat322TimeObservable{
-		parent:  parent,
+		parent: parent,
 		mapper: mapper,
 	}
 }
@@ -2851,31 +2906,28 @@ func MapFloat322TimeObserveDirect(parent Float32Observable, mapper MappingFloat3
 
 func MapFloat322TimeObserveNext(parent Float32Observable, mapper func(float32) time.Time) TimeObservable {
 	return MapFloat322TimeObservable(parent, func(TimeObserver) MappingFloat322TimeFunc {
-			return func(next float32, err error, complete bool, observer TimeObserver) {
-				var mapped time.Time
-				if err == nil && !complete {
-					mapped = mapper(next)
-				}
-				PassthroughTime(mapped, err, complete, observer)
+		return func(next float32, err error, complete bool, observer TimeObserver) {
+			var mapped time.Time
+			if err == nil && !complete {
+				mapped = mapper(next)
 			}
-		},
+			PassthroughTime(mapped, err, complete, observer)
+		}
+	},
 	)
 }
 
 func (f *MappingFloat322TimeObservable) Subscribe(observer TimeObserver) Subscription {
 	mapper := f.mapper(observer)
-	return f.parent.Subscribe(Float32ObserverFunc(func(next float32, err error, complete bool) {
+	return f.parent.Subscribe(NewFloat32ObserverFunc(func(next float32, err error, complete bool) {
 		mapper(next, err, complete, observer)
 	}))
 }
 
-
 // MapTime maps this stream to an TimeStream via f.
-func (s *Float32Stream) MapTime(f func (float32) time.Time) *TimeStream {
+func (s *Float32Stream) MapTime(f func(float32) time.Time) *TimeStream {
 	return FromTimeObservable(MapFloat322TimeObserveNext(s, f))
 }
-
-
 
 type TimeObserver interface {
 	Next(time.Time)
@@ -2883,7 +2935,7 @@ type TimeObserver interface {
 }
 
 func TimeObserverAsGenericObserver(observer TimeObserver) GenericObserver {
-	return GenericObserverFunc(func(next interface{}, err error, complete bool) {
+	return NewGenericObserverFunc(func(next interface{}, err error, complete bool) {
 		switch {
 		case err != nil:
 			observer.Error(err)
@@ -2896,7 +2948,7 @@ func TimeObserverAsGenericObserver(observer TimeObserver) GenericObserver {
 }
 
 func GenericObserverAsTimeObserver(observer GenericObserver) TimeObserver {
-	return TimeObserverFunc(func(next time.Time, err error, complete bool) {
+	return NewTimeObserverFunc(func(next time.Time, err error, complete bool) {
 		switch {
 		case err != nil:
 			observer.Error(err)
@@ -2908,7 +2960,7 @@ func GenericObserverAsTimeObserver(observer GenericObserver) TimeObserver {
 	})
 }
 
-type TimeObservableFactory func (observer TimeObserver, subscription Subscription)
+type TimeObservableFactory func(observer TimeObserver, subscription Subscription)
 
 func (f TimeObservableFactory) Subscribe(observer TimeObserver) Subscription {
 	subscription := NewGenericSubscription()
@@ -2917,13 +2969,13 @@ func (f TimeObservableFactory) Subscribe(observer TimeObserver) Subscription {
 }
 
 // CreateTime calls f(observer, subscription) to produce values for a stream.
-func CreateTime(f func (observer TimeObserver, subscription Subscription)) *TimeStream {
+func CreateTime(f func(observer TimeObserver, subscription Subscription)) *TimeStream {
 	return FromTimeObservable(TimeObservableFactory(f))
 }
 
 // Repeat value count times.
 func RepeatTime(value time.Time, count int) *TimeStream {
-	return CreateTime(func (observer TimeObserver, subscription Subscription) {
+	return CreateTime(func(observer TimeObserver, subscription Subscription) {
 		for i := 0; i < count; i++ {
 			if subscription.Unsubscribed() {
 				return
@@ -2935,8 +2987,8 @@ func RepeatTime(value time.Time, count int) *TimeStream {
 }
 
 // Start creates an observable with the result of a function call.
-func StartTime(f func () time.Time) *TimeStream {
-	return CreateTime(func (observer TimeObserver, subscription Subscription) {
+func StartTime(f func() time.Time) *TimeStream {
+	return CreateTime(func(observer TimeObserver, subscription Subscription) {
 		observer.Next(f())
 		observer.Complete()
 	})
@@ -2953,13 +3005,20 @@ func PassthroughTime(next time.Time, err error, complete bool, observer TimeObse
 	}
 }
 
-type TimeObserverFunc func(time.Time, error, bool)
+type TimeObserverFunc struct {
+	f func(time.Time, error, bool)
+	Subscription
+}
 
 var zeroTime = *new(time.Time)
 
-func (f TimeObserverFunc) Next(next time.Time) { f(next, nil, false) }
-func (f TimeObserverFunc) Error(err error)  { f(zeroTime, err, false) }
-func (f TimeObserverFunc) Complete()        { f(zeroTime, nil, true) }
+func NewTimeObserverFunc(f func(time.Time, error, bool)) *TimeObserverFunc {
+	return &TimeObserverFunc{f, NewGenericSubscription()}
+}
+
+func (f TimeObserverFunc) Next(next time.Time) { f.f(next, nil, false) }
+func (f TimeObserverFunc) Error(err error)     { f.f(zeroTime, err, false) }
+func (f TimeObserverFunc) Complete()           { f.f(zeroTime, nil, true) }
 
 type TimeObservable interface {
 	Subscribe(TimeObserver) Subscription
@@ -2968,33 +3027,33 @@ type TimeObservable interface {
 // Convert a GenericObservableFilter to a TimeObservable
 func (f GenericObservableFilterFactory) Time(parent TimeObservable) TimeObservable {
 	return MapTime2TimeObservable(parent, func(observer TimeObserver) MappingTime2TimeFunc {
-			gobserver := TimeObserverAsGenericObserver(observer)
-			filter := f(gobserver)
-			return func(next time.Time, err error, complete bool, observer TimeObserver) {
-				filter(next, err, complete, gobserver)
-			}
-		},
+		gobserver := TimeObserverAsGenericObserver(observer)
+		filter := f(gobserver)
+		return func(next time.Time, err error, complete bool, observer TimeObserver) {
+			filter(next, err, complete, gobserver)
+		}
+	},
 	)
 }
 
 func NeverTime() *TimeStream {
-	return CreateTime(func (observer TimeObserver, subscription Subscription) {})
+	return CreateTime(func(observer TimeObserver, subscription Subscription) {})
 }
 
 func EmptyTime() *TimeStream {
-	return CreateTime(func (observer TimeObserver, subscription Subscription) {
+	return CreateTime(func(observer TimeObserver, subscription Subscription) {
 		observer.Complete()
 	})
 }
 
 func ThrowTime(err error) *TimeStream {
-	return CreateTime(func (observer TimeObserver, subscription Subscription) {
+	return CreateTime(func(observer TimeObserver, subscription Subscription) {
 		observer.Error(err)
 	})
 }
 
 func FromTimeArray(array []time.Time) *TimeStream {
-	return CreateTime(func (observer TimeObserver, subscription Subscription) {
+	return CreateTime(func(observer TimeObserver, subscription Subscription) {
 		for _, v := range array {
 			if subscription.Unsubscribed() {
 				return
@@ -3002,7 +3061,7 @@ func FromTimeArray(array []time.Time) *TimeStream {
 			observer.Next(v)
 		}
 		observer.Complete()
-		subscription.Unsubscribe()
+		subscription.Close()
 	})
 }
 
@@ -3015,7 +3074,7 @@ func JustTime(element time.Time) *TimeStream {
 }
 
 func FromTimeChannel(ch <-chan time.Time) *TimeStream {
-	return CreateTime(func (observer TimeObserver, subscription Subscription) {
+	return CreateTime(func(observer TimeObserver, subscription Subscription) {
 		for v := range ch {
 			if subscription.Unsubscribed() {
 				return
@@ -3034,12 +3093,12 @@ func FromTimeObservable(observable TimeObservable) *TimeStream {
 	return &TimeStream{observable}
 }
 
-func (s *TimeStream) SubscribeFunc(f TimeObserverFunc) Subscription {
-	return s.Subscribe(f)
+func (s *TimeStream) SubscribeFunc(f func(time.Time, error, bool)) Subscription {
+	return s.Subscribe(NewTimeObserverFunc(f))
 }
 
-func (s *TimeStream) SubscribeNext(f func (v time.Time)) Subscription {
-	return s.SubscribeFunc(func (next time.Time, err error, complete bool) {
+func (s *TimeStream) SubscribeNext(f func(v time.Time)) Subscription {
+	return s.SubscribeFunc(func(next time.Time, err error, complete bool) {
 		if err == nil && !complete {
 			f(next)
 		}
@@ -3151,7 +3210,7 @@ func (c *concatTimeObserver) concat(next time.Time, err error, complete bool) {
 			c.observer.Complete()
 			return
 		}
-		c.observables[c.observable].Subscribe(TimeObserverFunc(c.concat))
+		c.observables[c.observable].Subscribe(NewTimeObserverFunc(c.concat))
 	default:
 		c.observer.Next(next)
 	}
@@ -3165,15 +3224,15 @@ func (m *concatTimeObservable) Subscribe(observer TimeObserver) Subscription {
 		observables:  m.observables,
 	}
 	if len(m.observables) > 0 {
-		m.observables[0].Subscribe(TimeObserverFunc(concatObserver.concat))
+		m.observables[0].Subscribe(NewTimeObserverFunc(concatObserver.concat))
 	} else {
-		subscription.Unsubscribe()
+		subscription.Close()
 	}
 	return subscription
 }
 
-func (s *TimeStream) Concat(observables ... TimeObservable) *TimeStream {
-	return &TimeStream{&concatTimeObservable{append([]TimeObservable{s}, observables...)} }
+func (s *TimeStream) Concat(observables ...TimeObservable) *TimeStream {
+	return &TimeStream{&concatTimeObservable{append([]TimeObservable{s}, observables...)}}
 }
 
 type mergeTimeObservable struct {
@@ -3206,19 +3265,19 @@ func (m *mergeTimeObservable) Subscribe(observer TimeObserver) Subscription {
 		}
 	}
 	for _, observable := range m.observables {
-		observable.Subscribe(TimeObserverFunc(relay))
+		observable.Subscribe(NewTimeObserverFunc(relay))
 	}
 	return subscription
 }
 
 // Merge an arbitrary
-func (s *TimeStream) Merge(other ... TimeObservable) *TimeStream {
-	return &TimeStream{&mergeTimeObservable{ append(other, s) } }
+func (s *TimeStream) Merge(other ...TimeObservable) *TimeStream {
+	return &TimeStream{&mergeTimeObservable{append(other, s)}}
 }
 
 type catchTimeObservable struct {
 	parent TimeObservable
-	catch TimeObservable
+	catch  TimeObservable
 }
 
 func (r *catchTimeObservable) Subscribe(observer TimeObserver) Subscription {
@@ -3233,12 +3292,12 @@ func (r *catchTimeObservable) Subscribe(observer TimeObserver) Subscription {
 			observer.Next(next)
 		}
 	}
-	r.parent.Subscribe(TimeObserverFunc(run))
+	r.parent.Subscribe(NewTimeObserverFunc(run))
 	return subscription
 }
 
 func (s *TimeStream) Catch(catch TimeObservable) *TimeStream {
-	return &TimeStream{ &catchTimeObservable{s, catch} }
+	return &TimeStream{&catchTimeObservable{s, catch}}
 }
 
 type retryTimeObservable struct {
@@ -3247,13 +3306,13 @@ type retryTimeObservable struct {
 
 type retryTimeObserver struct {
 	observable TimeObservable
-	observer TimeObserver
+	observer   TimeObserver
 }
 
 func (r *retryTimeObserver) retry(next time.Time, err error, complete bool) {
 	switch {
 	case err != nil:
-		r.observable.Subscribe(TimeObserverFunc(r.retry))
+		r.observable.Subscribe(NewTimeObserverFunc(r.retry))
 	case complete:
 		r.observer.Complete()
 	default:
@@ -3264,12 +3323,12 @@ func (r *retryTimeObserver) retry(next time.Time, err error, complete bool) {
 func (r *retryTimeObservable) Subscribe(observer TimeObserver) Subscription {
 	subscription := NewGenericSubscription()
 	ro := &retryTimeObserver{r.observable, observer}
-	r.observable.Subscribe(TimeObserverFunc(ro.retry))
+	r.observable.Subscribe(NewTimeObserverFunc(ro.retry))
 	return subscription
 }
 
 func (s *TimeStream) Retry() *TimeStream {
-	return &TimeStream{ &retryTimeObservable{s} }
+	return &TimeStream{&retryTimeObservable{s}}
 }
 
 // Do applies a function for each value passing through the stream.
@@ -3300,7 +3359,7 @@ func (s *TimeStream) DoOnComplete(f func()) *TimeStream {
 	}))
 }
 
-func (s *TimeStream) Reduce(initial time.Time, reducer func (time.Time, time.Time) time.Time) *TimeStream {
+func (s *TimeStream) Reduce(initial time.Time, reducer func(time.Time, time.Time) time.Time) *TimeStream {
 	value := initial
 	return FromTimeObservable(MapTime2TimeObserveDirect(s, func(next time.Time, err error, complete bool, observer TimeObserver) {
 		switch {
@@ -3316,7 +3375,7 @@ func (s *TimeStream) Reduce(initial time.Time, reducer func (time.Time, time.Tim
 	}))
 }
 
-func (s *TimeStream) Scan(initial time.Time, f func (time.Time, time.Time) time.Time) *TimeStream {
+func (s *TimeStream) Scan(initial time.Time, f func(time.Time, time.Time) time.Time) *TimeStream {
 	value := initial
 	return FromTimeObservable(MapTime2TimeObserveDirect(s, func(next time.Time, err error, complete bool, observer TimeObserver) {
 		switch {
@@ -3335,7 +3394,7 @@ func (s *TimeStream) Scan(initial time.Time, f func (time.Time, time.Time) time.
 func (s *TimeStream) ToOneWithError() (time.Time, error) {
 	valuech := make(chan time.Time, 1)
 	errch := make(chan error, 1)
-	FromTimeObservable(oneFilter().Time(s)).SubscribeFunc(func (next time.Time, err error, complete bool) {
+	FromTimeObservable(oneFilter().Time(s)).SubscribeFunc(func(next time.Time, err error, complete bool) {
 		if err != nil {
 			errch <- err
 		} else if !complete {
@@ -3396,6 +3455,7 @@ func (s *TimeStream) ToChannelWithError() (<-chan time.Time, <-chan error) {
 		case err != nil:
 			errch <- err
 			close(errch)
+			close(ch)
 		case complete:
 			close(ch)
 		default:
@@ -3427,18 +3487,17 @@ func (s *TimeStream) Count() *IntStream {
 	}))
 }
 
-
 type MappingTime2IntFunc func(next time.Time, err error, complete bool, observer IntObserver)
-type MappingTime2IntFuncFactory func (observer IntObserver) MappingTime2IntFunc
+type MappingTime2IntFuncFactory func(observer IntObserver) MappingTime2IntFunc
 
 type MappingTime2IntObservable struct {
-	parent  TimeObservable
+	parent TimeObservable
 	mapper MappingTime2IntFuncFactory
 }
 
 func MapTime2IntObservable(parent TimeObservable, mapper MappingTime2IntFuncFactory) IntObservable {
 	return &MappingTime2IntObservable{
-		parent:  parent,
+		parent: parent,
 		mapper: mapper,
 	}
 }
@@ -3451,41 +3510,40 @@ func MapTime2IntObserveDirect(parent TimeObservable, mapper MappingTime2IntFunc)
 
 func MapTime2IntObserveNext(parent TimeObservable, mapper func(time.Time) int) IntObservable {
 	return MapTime2IntObservable(parent, func(IntObserver) MappingTime2IntFunc {
-			return func(next time.Time, err error, complete bool, observer IntObserver) {
-				var mapped int
-				if err == nil && !complete {
-					mapped = mapper(next)
-				}
-				PassthroughInt(mapped, err, complete, observer)
+		return func(next time.Time, err error, complete bool, observer IntObserver) {
+			var mapped int
+			if err == nil && !complete {
+				mapped = mapper(next)
 			}
-		},
+			PassthroughInt(mapped, err, complete, observer)
+		}
+	},
 	)
 }
 
 func (f *MappingTime2IntObservable) Subscribe(observer IntObserver) Subscription {
 	mapper := f.mapper(observer)
-	return f.parent.Subscribe(TimeObserverFunc(func(next time.Time, err error, complete bool) {
+	return f.parent.Subscribe(NewTimeObserverFunc(func(next time.Time, err error, complete bool) {
 		mapper(next, err, complete, observer)
 	}))
 }
 
-
 // MapInt maps this stream to an IntStream via f.
-func (s *TimeStream) MapInt(f func (time.Time) int) *IntStream {
+func (s *TimeStream) MapInt(f func(time.Time) int) *IntStream {
 	return FromIntObservable(MapTime2IntObserveNext(s, f))
 }
 
 type MappingTime2StringFunc func(next time.Time, err error, complete bool, observer StringObserver)
-type MappingTime2StringFuncFactory func (observer StringObserver) MappingTime2StringFunc
+type MappingTime2StringFuncFactory func(observer StringObserver) MappingTime2StringFunc
 
 type MappingTime2StringObservable struct {
-	parent  TimeObservable
+	parent TimeObservable
 	mapper MappingTime2StringFuncFactory
 }
 
 func MapTime2StringObservable(parent TimeObservable, mapper MappingTime2StringFuncFactory) StringObservable {
 	return &MappingTime2StringObservable{
-		parent:  parent,
+		parent: parent,
 		mapper: mapper,
 	}
 }
@@ -3498,41 +3556,40 @@ func MapTime2StringObserveDirect(parent TimeObservable, mapper MappingTime2Strin
 
 func MapTime2StringObserveNext(parent TimeObservable, mapper func(time.Time) string) StringObservable {
 	return MapTime2StringObservable(parent, func(StringObserver) MappingTime2StringFunc {
-			return func(next time.Time, err error, complete bool, observer StringObserver) {
-				var mapped string
-				if err == nil && !complete {
-					mapped = mapper(next)
-				}
-				PassthroughString(mapped, err, complete, observer)
+		return func(next time.Time, err error, complete bool, observer StringObserver) {
+			var mapped string
+			if err == nil && !complete {
+				mapped = mapper(next)
 			}
-		},
+			PassthroughString(mapped, err, complete, observer)
+		}
+	},
 	)
 }
 
 func (f *MappingTime2StringObservable) Subscribe(observer StringObserver) Subscription {
 	mapper := f.mapper(observer)
-	return f.parent.Subscribe(TimeObserverFunc(func(next time.Time, err error, complete bool) {
+	return f.parent.Subscribe(NewTimeObserverFunc(func(next time.Time, err error, complete bool) {
 		mapper(next, err, complete, observer)
 	}))
 }
 
-
 // MapString maps this stream to an StringStream via f.
-func (s *TimeStream) MapString(f func (time.Time) string) *StringStream {
+func (s *TimeStream) MapString(f func(time.Time) string) *StringStream {
 	return FromStringObservable(MapTime2StringObserveNext(s, f))
 }
 
 type MappingTime2Float32Func func(next time.Time, err error, complete bool, observer Float32Observer)
-type MappingTime2Float32FuncFactory func (observer Float32Observer) MappingTime2Float32Func
+type MappingTime2Float32FuncFactory func(observer Float32Observer) MappingTime2Float32Func
 
 type MappingTime2Float32Observable struct {
-	parent  TimeObservable
+	parent TimeObservable
 	mapper MappingTime2Float32FuncFactory
 }
 
 func MapTime2Float32Observable(parent TimeObservable, mapper MappingTime2Float32FuncFactory) Float32Observable {
 	return &MappingTime2Float32Observable{
-		parent:  parent,
+		parent: parent,
 		mapper: mapper,
 	}
 }
@@ -3545,41 +3602,40 @@ func MapTime2Float32ObserveDirect(parent TimeObservable, mapper MappingTime2Floa
 
 func MapTime2Float32ObserveNext(parent TimeObservable, mapper func(time.Time) float32) Float32Observable {
 	return MapTime2Float32Observable(parent, func(Float32Observer) MappingTime2Float32Func {
-			return func(next time.Time, err error, complete bool, observer Float32Observer) {
-				var mapped float32
-				if err == nil && !complete {
-					mapped = mapper(next)
-				}
-				PassthroughFloat32(mapped, err, complete, observer)
+		return func(next time.Time, err error, complete bool, observer Float32Observer) {
+			var mapped float32
+			if err == nil && !complete {
+				mapped = mapper(next)
 			}
-		},
+			PassthroughFloat32(mapped, err, complete, observer)
+		}
+	},
 	)
 }
 
 func (f *MappingTime2Float32Observable) Subscribe(observer Float32Observer) Subscription {
 	mapper := f.mapper(observer)
-	return f.parent.Subscribe(TimeObserverFunc(func(next time.Time, err error, complete bool) {
+	return f.parent.Subscribe(NewTimeObserverFunc(func(next time.Time, err error, complete bool) {
 		mapper(next, err, complete, observer)
 	}))
 }
 
-
 // MapFloat32 maps this stream to an Float32Stream via f.
-func (s *TimeStream) MapFloat32(f func (time.Time) float32) *Float32Stream {
+func (s *TimeStream) MapFloat32(f func(time.Time) float32) *Float32Stream {
 	return FromFloat32Observable(MapTime2Float32ObserveNext(s, f))
 }
 
 type MappingTime2TimeFunc func(next time.Time, err error, complete bool, observer TimeObserver)
-type MappingTime2TimeFuncFactory func (observer TimeObserver) MappingTime2TimeFunc
+type MappingTime2TimeFuncFactory func(observer TimeObserver) MappingTime2TimeFunc
 
 type MappingTime2TimeObservable struct {
-	parent  TimeObservable
+	parent TimeObservable
 	mapper MappingTime2TimeFuncFactory
 }
 
 func MapTime2TimeObservable(parent TimeObservable, mapper MappingTime2TimeFuncFactory) TimeObservable {
 	return &MappingTime2TimeObservable{
-		parent:  parent,
+		parent: parent,
 		mapper: mapper,
 	}
 }
@@ -3592,23 +3648,20 @@ func MapTime2TimeObserveDirect(parent TimeObservable, mapper MappingTime2TimeFun
 
 func MapTime2TimeObserveNext(parent TimeObservable, mapper func(time.Time) time.Time) TimeObservable {
 	return MapTime2TimeObservable(parent, func(TimeObserver) MappingTime2TimeFunc {
-			return func(next time.Time, err error, complete bool, observer TimeObserver) {
-				var mapped time.Time
-				if err == nil && !complete {
-					mapped = mapper(next)
-				}
-				PassthroughTime(mapped, err, complete, observer)
+		return func(next time.Time, err error, complete bool, observer TimeObserver) {
+			var mapped time.Time
+			if err == nil && !complete {
+				mapped = mapper(next)
 			}
-		},
+			PassthroughTime(mapped, err, complete, observer)
+		}
+	},
 	)
 }
 
 func (f *MappingTime2TimeObservable) Subscribe(observer TimeObserver) Subscription {
 	mapper := f.mapper(observer)
-	return f.parent.Subscribe(TimeObserverFunc(func(next time.Time, err error, complete bool) {
+	return f.parent.Subscribe(NewTimeObserverFunc(func(next time.Time, err error, complete bool) {
 		mapper(next, err, complete, observer)
 	}))
 }
-
-
-
