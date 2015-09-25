@@ -17,15 +17,18 @@ var MaxReplaySize = 16384
 type Subscription interface {
 	// Unsubscribe from the subscription.
 	io.Closer
-	// Unsubscribed returns true if this subscription has been unsubscribed.
-	Unsubscribed() bool
+	// Closed returns true if this subscription has been unsubscribed.
+	Closed() bool
 }
 
 // A Subscription that is already closed.
-type ClosedSubscription struct{}
+type closedSubscription struct{}
 
-func (ClosedSubscription) Close() error       { return nil }
-func (ClosedSubscription) Unsubscribed() bool { return true }
+func (closedSubscription) Close() error { return nil }
+func (closedSubscription) Closed() bool { return true }
+
+// ClosedSubscription always returns true for Closed()
+var ClosedSubscription Subscription = closedSubscription{}
 
 // A LinkedSubscription is a link to a (possible) future Subscription.
 type LinkedSubscription struct {
@@ -55,16 +58,16 @@ func (l *LinkedSubscription) Close() error {
 	defer l.lock.Unlock()
 	l.unsubscribed = true
 	if l.linked != nil {
-		l.linked.Close()
+		return l.linked.Close()
 	}
 	return nil
 }
 
-func (l *LinkedSubscription) Unsubscribed() bool {
+func (l *LinkedSubscription) Closed() bool {
 	l.lock.Lock()
 	defer l.lock.Unlock()
 	if l.linked != nil {
-		return l.linked.Unsubscribed()
+		return l.linked.Closed()
 	}
 	return l.unsubscribed
 }
@@ -83,7 +86,7 @@ func (c ChannelSubscription) Close() error {
 	return nil
 }
 
-func (c ChannelSubscription) Unsubscribed() bool {
+func (c ChannelSubscription) Closed() bool {
 	select {
 	case _, ok := <-c:
 		return !ok
@@ -104,7 +107,7 @@ func (t *GenericSubscription) Close() error {
 	return nil
 }
 
-func (t *GenericSubscription) Unsubscribed() bool {
+func (t *GenericSubscription) Closed() bool {
 	return atomic.LoadInt32((*int32)(t)) == 1
 }
 
@@ -112,7 +115,6 @@ func (t *GenericSubscription) Unsubscribed() bool {
 type TerminationObserver interface {
 	Error(error)
 	Complete()
-	Unsubscribed() bool
 }
 
 type GenericObserver interface {
@@ -514,7 +516,7 @@ func replayFilter(size int, duration time.Duration) GenericObservableFilterFacto
 func Range(start, end int) *IntStream {
 	return CreateInt(func(observer IntObserver, subscription Subscription) {
 		for i := start; i < end; i++ {
-			if subscription.Unsubscribed() {
+			if subscription.Closed() {
 				return
 			}
 			observer.Next(i)
@@ -529,7 +531,7 @@ func Interval(interval time.Duration) *IntStream {
 		i := 0
 		for {
 			time.Sleep(interval)
-			if subscription.Unsubscribed() {
+			if subscription.Closed() {
 				return
 			}
 			observer.Next(i)
@@ -541,6 +543,17 @@ func Interval(interval time.Duration) *IntStream {
 type IntObserver interface {
 	Next(int)
 	TerminationObserver
+}
+
+// A IntSubscriber represents a subscribed IntObserver.
+type IntSubscriber interface {
+	Subscription
+	IntObserver
+}
+
+type implIntSubscriber struct {
+	Subscription
+	IntObserver
 }
 
 func IntObserverAsGenericObserver(observer IntObserver) GenericObserver {
@@ -586,7 +599,7 @@ func CreateInt(f func(observer IntObserver, subscription Subscription)) *IntStre
 func RepeatInt(value int, count int) *IntStream {
 	return CreateInt(func(observer IntObserver, subscription Subscription) {
 		for i := 0; i < count; i++ {
-			if subscription.Unsubscribed() {
+			if subscription.Closed() {
 				return
 			}
 			observer.Next(value)
@@ -595,11 +608,19 @@ func RepeatInt(value int, count int) *IntStream {
 	})
 }
 
-// Start creates an observable with the result of a function call.
-func StartInt(f func() int) *IntStream {
+// StartInt is designed to be used with functions that return a
+// (int, error) tuple.
+//
+// If the error is non-nil the returned IntStream will be that error,
+// otherwise it will be a single-value stream of int.
+func StartInt(f func() (int, error)) *IntStream {
 	return CreateInt(func(observer IntObserver, subscription Subscription) {
-		observer.Next(f())
-		observer.Complete()
+		if v, err := f(); err != nil {
+			observer.Error(err)
+		} else {
+			observer.Next(v)
+			observer.Complete()
+		}
 	})
 }
 
@@ -614,20 +635,17 @@ func PassthroughInt(next int, err error, complete bool, observer IntObserver) {
 	}
 }
 
-type IntObserverFunc struct {
-	f func(int, error, bool)
-	Subscription
-}
+type IntObserverFunc func(int, error, bool)
 
 var zeroInt = *new(int)
 
-func NewIntObserverFunc(f func(int, error, bool)) *IntObserverFunc {
-	return &IntObserverFunc{f, NewGenericSubscription()}
+func NewIntObserverFunc(f func(int, error, bool)) IntObserverFunc {
+	return f
 }
 
-func (f IntObserverFunc) Next(next int)   { f.f(next, nil, false) }
-func (f IntObserverFunc) Error(err error) { f.f(zeroInt, err, false) }
-func (f IntObserverFunc) Complete()       { f.f(zeroInt, nil, true) }
+func (f IntObserverFunc) Next(next int)   { f(next, nil, false) }
+func (f IntObserverFunc) Error(err error) { f(zeroInt, err, false) }
+func (f IntObserverFunc) Complete()       { f(zeroInt, nil, true) }
 
 type IntObservable interface {
 	Subscribe(IntObserver) Subscription
@@ -664,7 +682,7 @@ func ThrowInt(err error) *IntStream {
 func FromIntArray(array []int) *IntStream {
 	return CreateInt(func(observer IntObserver, subscription Subscription) {
 		for _, v := range array {
-			if subscription.Unsubscribed() {
+			if subscription.Closed() {
 				return
 			}
 			observer.Next(v)
@@ -682,10 +700,24 @@ func JustInt(element int) *IntStream {
 	return FromIntArray([]int{element})
 }
 
+func MergeInt(observables ...IntObservable) *IntStream {
+	if len(observables) == 0 {
+		return EmptyInt()
+	}
+	return (&IntStream{observables[0]}).Merge(observables[1:]...)
+}
+
+func MergeIntDelayError(observables ...IntObservable) *IntStream {
+	if len(observables) == 0 {
+		return EmptyInt()
+	}
+	return (&IntStream{observables[0]}).MergeDelayError(observables[1:]...)
+}
+
 func FromIntChannel(ch <-chan int) *IntStream {
 	return CreateInt(func(observer IntObserver, subscription Subscription) {
 		for v := range ch {
-			if subscription.Unsubscribed() {
+			if subscription.Closed() {
 				return
 			}
 			observer.Next(v)
@@ -791,53 +823,56 @@ func (s *IntStream) Wait() error {
 	return <-errch
 }
 
+func MakeIntSubscriber(observer IntObserver) IntSubscriber {
+	if subscriber, ok := observer.(IntSubscriber); ok {
+		return subscriber
+	}
+	return &implIntSubscriber{NewGenericSubscription(), observer}
+}
+
+type concatIntSubscriber struct {
+	observable  int
+	observer    IntObserver
+	observables []IntObservable
+	Subscription
+}
+
+func (c *concatIntSubscriber) Next(next int) {
+	c.observer.Next(next)
+}
+
+func (c *concatIntSubscriber) Error(err error) {
+	c.observer.Error(err)
+	c.observable = len(c.observables)
+	c.Close()
+}
+
+func (c *concatIntSubscriber) Complete() {
+	c.observable++
+	if c.observable >= len(c.observables) {
+		c.observer.Complete()
+		c.Close()
+		return
+	}
+	c.observables[c.observable].Subscribe(c)
+}
+
 type concatIntObservable struct {
 	observables []IntObservable
 }
 
-type concatIntObserver struct {
-	lock         sync.Mutex
-	observable   int
-	observer     IntObserver
-	observables  []IntObservable
-	subscription Subscription
-}
-
-func (c *concatIntObserver) concat(next int, err error, complete bool) {
-	c.lock.Lock()
-	defer c.lock.Unlock()
-	if c.subscription.Unsubscribed() || c.observable >= len(c.observables) {
-		return
-	}
-	switch {
-	case err != nil:
-		c.observer.Error(err)
-		c.observable = len(c.observables)
-	case complete:
-		c.observable++
-		if c.observable >= len(c.observables) {
-			c.observer.Complete()
-			return
-		}
-		c.observables[c.observable].Subscribe(NewIntObserverFunc(c.concat))
-	default:
-		c.observer.Next(next)
-	}
-}
-
 func (m *concatIntObservable) Subscribe(observer IntObserver) Subscription {
-	subscription := NewGenericSubscription()
-	concatObserver := &concatIntObserver{
+	if len(m.observables) == 0 {
+		observer.Complete()
+		return ClosedSubscription
+	}
+	subscriber := &concatIntSubscriber{
 		observer:     observer,
-		subscription: subscription,
+		Subscription: NewGenericSubscription(),
 		observables:  m.observables,
 	}
-	if len(m.observables) > 0 {
-		m.observables[0].Subscribe(NewIntObserverFunc(concatObserver.concat))
-	} else {
-		subscription.Close()
-	}
-	return subscription
+	m.observables[0].Subscribe(subscriber)
+	return subscriber
 }
 
 func (s *IntStream) Concat(observables ...IntObservable) *IntStream {
@@ -845,6 +880,7 @@ func (s *IntStream) Concat(observables ...IntObservable) *IntStream {
 }
 
 type mergeIntObservable struct {
+	delayError  bool
 	observables []IntObservable
 }
 
@@ -852,6 +888,7 @@ func (m *mergeIntObservable) Subscribe(observer IntObserver) Subscription {
 	subscription := NewGenericSubscription()
 	lock := sync.Mutex{}
 	completed := 0
+	var firstError error
 	relay := func(next int, err error, complete bool) {
 		lock.Lock()
 		defer lock.Unlock()
@@ -861,13 +898,22 @@ func (m *mergeIntObservable) Subscribe(observer IntObserver) Subscription {
 
 		switch {
 		case err != nil:
-			observer.Error(err)
-			completed = len(m.observables)
+			if m.delayError {
+				firstError = err
+				completed++
+			} else {
+				observer.Error(err)
+				completed = len(m.observables)
+			}
 
 		case complete:
 			completed++
 			if completed == len(m.observables) {
-				observer.Complete()
+				if firstError != nil {
+					observer.Error(firstError)
+				} else {
+					observer.Complete()
+				}
 			}
 		default:
 			observer.Next(next)
@@ -879,9 +925,22 @@ func (m *mergeIntObservable) Subscribe(observer IntObserver) Subscription {
 	return subscription
 }
 
-// Merge an arbitrary
+// Merge an arbitrary number of observables with this one.
+// An error from any of the observables will terminate the merged stream.
 func (s *IntStream) Merge(other ...IntObservable) *IntStream {
-	return &IntStream{&mergeIntObservable{append(other, s)}}
+	if len(other) == 0 {
+		return s
+	}
+	return &IntStream{&mergeIntObservable{false, append(other, s)}}
+}
+
+// Merge an arbitrary number of observables with this one.
+// Any error will be deferred until all observables terminate.
+func (s *IntStream) MergeDelayError(other ...IntObservable) *IntStream {
+	if len(other) == 0 {
+		return s
+	}
+	return &IntStream{&mergeIntObservable{true, append(other, s)}}
 }
 
 type catchIntObservable struct {
@@ -1370,6 +1429,17 @@ type StringObserver interface {
 	TerminationObserver
 }
 
+// A StringSubscriber represents a subscribed StringObserver.
+type StringSubscriber interface {
+	Subscription
+	StringObserver
+}
+
+type implStringSubscriber struct {
+	Subscription
+	StringObserver
+}
+
 func StringObserverAsGenericObserver(observer StringObserver) GenericObserver {
 	return NewGenericObserverFunc(func(next interface{}, err error, complete bool) {
 		switch {
@@ -1413,7 +1483,7 @@ func CreateString(f func(observer StringObserver, subscription Subscription)) *S
 func RepeatString(value string, count int) *StringStream {
 	return CreateString(func(observer StringObserver, subscription Subscription) {
 		for i := 0; i < count; i++ {
-			if subscription.Unsubscribed() {
+			if subscription.Closed() {
 				return
 			}
 			observer.Next(value)
@@ -1422,11 +1492,19 @@ func RepeatString(value string, count int) *StringStream {
 	})
 }
 
-// Start creates an observable with the result of a function call.
-func StartString(f func() string) *StringStream {
+// StartString is designed to be used with functions that return a
+// (string, error) tuple.
+//
+// If the error is non-nil the returned StringStream will be that error,
+// otherwise it will be a single-value stream of string.
+func StartString(f func() (string, error)) *StringStream {
 	return CreateString(func(observer StringObserver, subscription Subscription) {
-		observer.Next(f())
-		observer.Complete()
+		if v, err := f(); err != nil {
+			observer.Error(err)
+		} else {
+			observer.Next(v)
+			observer.Complete()
+		}
 	})
 }
 
@@ -1441,20 +1519,17 @@ func PassthroughString(next string, err error, complete bool, observer StringObs
 	}
 }
 
-type StringObserverFunc struct {
-	f func(string, error, bool)
-	Subscription
-}
+type StringObserverFunc func(string, error, bool)
 
 var zeroString = *new(string)
 
-func NewStringObserverFunc(f func(string, error, bool)) *StringObserverFunc {
-	return &StringObserverFunc{f, NewGenericSubscription()}
+func NewStringObserverFunc(f func(string, error, bool)) StringObserverFunc {
+	return f
 }
 
-func (f StringObserverFunc) Next(next string) { f.f(next, nil, false) }
-func (f StringObserverFunc) Error(err error)  { f.f(zeroString, err, false) }
-func (f StringObserverFunc) Complete()        { f.f(zeroString, nil, true) }
+func (f StringObserverFunc) Next(next string) { f(next, nil, false) }
+func (f StringObserverFunc) Error(err error)  { f(zeroString, err, false) }
+func (f StringObserverFunc) Complete()        { f(zeroString, nil, true) }
 
 type StringObservable interface {
 	Subscribe(StringObserver) Subscription
@@ -1491,7 +1566,7 @@ func ThrowString(err error) *StringStream {
 func FromStringArray(array []string) *StringStream {
 	return CreateString(func(observer StringObserver, subscription Subscription) {
 		for _, v := range array {
-			if subscription.Unsubscribed() {
+			if subscription.Closed() {
 				return
 			}
 			observer.Next(v)
@@ -1509,10 +1584,24 @@ func JustString(element string) *StringStream {
 	return FromStringArray([]string{element})
 }
 
+func MergeString(observables ...StringObservable) *StringStream {
+	if len(observables) == 0 {
+		return EmptyString()
+	}
+	return (&StringStream{observables[0]}).Merge(observables[1:]...)
+}
+
+func MergeStringDelayError(observables ...StringObservable) *StringStream {
+	if len(observables) == 0 {
+		return EmptyString()
+	}
+	return (&StringStream{observables[0]}).MergeDelayError(observables[1:]...)
+}
+
 func FromStringChannel(ch <-chan string) *StringStream {
 	return CreateString(func(observer StringObserver, subscription Subscription) {
 		for v := range ch {
-			if subscription.Unsubscribed() {
+			if subscription.Closed() {
 				return
 			}
 			observer.Next(v)
@@ -1618,53 +1707,56 @@ func (s *StringStream) Wait() error {
 	return <-errch
 }
 
+func MakeStringSubscriber(observer StringObserver) StringSubscriber {
+	if subscriber, ok := observer.(StringSubscriber); ok {
+		return subscriber
+	}
+	return &implStringSubscriber{NewGenericSubscription(), observer}
+}
+
+type concatStringSubscriber struct {
+	observable  int
+	observer    StringObserver
+	observables []StringObservable
+	Subscription
+}
+
+func (c *concatStringSubscriber) Next(next string) {
+	c.observer.Next(next)
+}
+
+func (c *concatStringSubscriber) Error(err error) {
+	c.observer.Error(err)
+	c.observable = len(c.observables)
+	c.Close()
+}
+
+func (c *concatStringSubscriber) Complete() {
+	c.observable++
+	if c.observable >= len(c.observables) {
+		c.observer.Complete()
+		c.Close()
+		return
+	}
+	c.observables[c.observable].Subscribe(c)
+}
+
 type concatStringObservable struct {
 	observables []StringObservable
 }
 
-type concatStringObserver struct {
-	lock         sync.Mutex
-	observable   int
-	observer     StringObserver
-	observables  []StringObservable
-	subscription Subscription
-}
-
-func (c *concatStringObserver) concat(next string, err error, complete bool) {
-	c.lock.Lock()
-	defer c.lock.Unlock()
-	if c.subscription.Unsubscribed() || c.observable >= len(c.observables) {
-		return
-	}
-	switch {
-	case err != nil:
-		c.observer.Error(err)
-		c.observable = len(c.observables)
-	case complete:
-		c.observable++
-		if c.observable >= len(c.observables) {
-			c.observer.Complete()
-			return
-		}
-		c.observables[c.observable].Subscribe(NewStringObserverFunc(c.concat))
-	default:
-		c.observer.Next(next)
-	}
-}
-
 func (m *concatStringObservable) Subscribe(observer StringObserver) Subscription {
-	subscription := NewGenericSubscription()
-	concatObserver := &concatStringObserver{
+	if len(m.observables) == 0 {
+		observer.Complete()
+		return ClosedSubscription
+	}
+	subscriber := &concatStringSubscriber{
 		observer:     observer,
-		subscription: subscription,
+		Subscription: NewGenericSubscription(),
 		observables:  m.observables,
 	}
-	if len(m.observables) > 0 {
-		m.observables[0].Subscribe(NewStringObserverFunc(concatObserver.concat))
-	} else {
-		subscription.Close()
-	}
-	return subscription
+	m.observables[0].Subscribe(subscriber)
+	return subscriber
 }
 
 func (s *StringStream) Concat(observables ...StringObservable) *StringStream {
@@ -1672,6 +1764,7 @@ func (s *StringStream) Concat(observables ...StringObservable) *StringStream {
 }
 
 type mergeStringObservable struct {
+	delayError  bool
 	observables []StringObservable
 }
 
@@ -1679,6 +1772,7 @@ func (m *mergeStringObservable) Subscribe(observer StringObserver) Subscription 
 	subscription := NewGenericSubscription()
 	lock := sync.Mutex{}
 	completed := 0
+	var firstError error
 	relay := func(next string, err error, complete bool) {
 		lock.Lock()
 		defer lock.Unlock()
@@ -1688,13 +1782,22 @@ func (m *mergeStringObservable) Subscribe(observer StringObserver) Subscription 
 
 		switch {
 		case err != nil:
-			observer.Error(err)
-			completed = len(m.observables)
+			if m.delayError {
+				firstError = err
+				completed++
+			} else {
+				observer.Error(err)
+				completed = len(m.observables)
+			}
 
 		case complete:
 			completed++
 			if completed == len(m.observables) {
-				observer.Complete()
+				if firstError != nil {
+					observer.Error(firstError)
+				} else {
+					observer.Complete()
+				}
 			}
 		default:
 			observer.Next(next)
@@ -1706,9 +1809,22 @@ func (m *mergeStringObservable) Subscribe(observer StringObserver) Subscription 
 	return subscription
 }
 
-// Merge an arbitrary
+// Merge an arbitrary number of observables with this one.
+// An error from any of the observables will terminate the merged stream.
 func (s *StringStream) Merge(other ...StringObservable) *StringStream {
-	return &StringStream{&mergeStringObservable{append(other, s)}}
+	if len(other) == 0 {
+		return s
+	}
+	return &StringStream{&mergeStringObservable{false, append(other, s)}}
+}
+
+// Merge an arbitrary number of observables with this one.
+// Any error will be deferred until all observables terminate.
+func (s *StringStream) MergeDelayError(other ...StringObservable) *StringStream {
+	if len(other) == 0 {
+		return s
+	}
+	return &StringStream{&mergeStringObservable{true, append(other, s)}}
 }
 
 type catchStringObservable struct {
@@ -2107,6 +2223,17 @@ type Float32Observer interface {
 	TerminationObserver
 }
 
+// A Float32Subscriber represents a subscribed Float32Observer.
+type Float32Subscriber interface {
+	Subscription
+	Float32Observer
+}
+
+type implFloat32Subscriber struct {
+	Subscription
+	Float32Observer
+}
+
 func Float32ObserverAsGenericObserver(observer Float32Observer) GenericObserver {
 	return NewGenericObserverFunc(func(next interface{}, err error, complete bool) {
 		switch {
@@ -2150,7 +2277,7 @@ func CreateFloat32(f func(observer Float32Observer, subscription Subscription)) 
 func RepeatFloat32(value float32, count int) *Float32Stream {
 	return CreateFloat32(func(observer Float32Observer, subscription Subscription) {
 		for i := 0; i < count; i++ {
-			if subscription.Unsubscribed() {
+			if subscription.Closed() {
 				return
 			}
 			observer.Next(value)
@@ -2159,11 +2286,19 @@ func RepeatFloat32(value float32, count int) *Float32Stream {
 	})
 }
 
-// Start creates an observable with the result of a function call.
-func StartFloat32(f func() float32) *Float32Stream {
+// StartFloat32 is designed to be used with functions that return a
+// (float32, error) tuple.
+//
+// If the error is non-nil the returned Float32Stream will be that error,
+// otherwise it will be a single-value stream of float32.
+func StartFloat32(f func() (float32, error)) *Float32Stream {
 	return CreateFloat32(func(observer Float32Observer, subscription Subscription) {
-		observer.Next(f())
-		observer.Complete()
+		if v, err := f(); err != nil {
+			observer.Error(err)
+		} else {
+			observer.Next(v)
+			observer.Complete()
+		}
 	})
 }
 
@@ -2178,20 +2313,17 @@ func PassthroughFloat32(next float32, err error, complete bool, observer Float32
 	}
 }
 
-type Float32ObserverFunc struct {
-	f func(float32, error, bool)
-	Subscription
-}
+type Float32ObserverFunc func(float32, error, bool)
 
 var zeroFloat32 = *new(float32)
 
-func NewFloat32ObserverFunc(f func(float32, error, bool)) *Float32ObserverFunc {
-	return &Float32ObserverFunc{f, NewGenericSubscription()}
+func NewFloat32ObserverFunc(f func(float32, error, bool)) Float32ObserverFunc {
+	return f
 }
 
-func (f Float32ObserverFunc) Next(next float32) { f.f(next, nil, false) }
-func (f Float32ObserverFunc) Error(err error)   { f.f(zeroFloat32, err, false) }
-func (f Float32ObserverFunc) Complete()         { f.f(zeroFloat32, nil, true) }
+func (f Float32ObserverFunc) Next(next float32) { f(next, nil, false) }
+func (f Float32ObserverFunc) Error(err error)   { f(zeroFloat32, err, false) }
+func (f Float32ObserverFunc) Complete()         { f(zeroFloat32, nil, true) }
 
 type Float32Observable interface {
 	Subscribe(Float32Observer) Subscription
@@ -2228,7 +2360,7 @@ func ThrowFloat32(err error) *Float32Stream {
 func FromFloat32Array(array []float32) *Float32Stream {
 	return CreateFloat32(func(observer Float32Observer, subscription Subscription) {
 		for _, v := range array {
-			if subscription.Unsubscribed() {
+			if subscription.Closed() {
 				return
 			}
 			observer.Next(v)
@@ -2246,10 +2378,24 @@ func JustFloat32(element float32) *Float32Stream {
 	return FromFloat32Array([]float32{element})
 }
 
+func MergeFloat32(observables ...Float32Observable) *Float32Stream {
+	if len(observables) == 0 {
+		return EmptyFloat32()
+	}
+	return (&Float32Stream{observables[0]}).Merge(observables[1:]...)
+}
+
+func MergeFloat32DelayError(observables ...Float32Observable) *Float32Stream {
+	if len(observables) == 0 {
+		return EmptyFloat32()
+	}
+	return (&Float32Stream{observables[0]}).MergeDelayError(observables[1:]...)
+}
+
 func FromFloat32Channel(ch <-chan float32) *Float32Stream {
 	return CreateFloat32(func(observer Float32Observer, subscription Subscription) {
 		for v := range ch {
-			if subscription.Unsubscribed() {
+			if subscription.Closed() {
 				return
 			}
 			observer.Next(v)
@@ -2355,53 +2501,56 @@ func (s *Float32Stream) Wait() error {
 	return <-errch
 }
 
+func MakeFloat32Subscriber(observer Float32Observer) Float32Subscriber {
+	if subscriber, ok := observer.(Float32Subscriber); ok {
+		return subscriber
+	}
+	return &implFloat32Subscriber{NewGenericSubscription(), observer}
+}
+
+type concatFloat32Subscriber struct {
+	observable  int
+	observer    Float32Observer
+	observables []Float32Observable
+	Subscription
+}
+
+func (c *concatFloat32Subscriber) Next(next float32) {
+	c.observer.Next(next)
+}
+
+func (c *concatFloat32Subscriber) Error(err error) {
+	c.observer.Error(err)
+	c.observable = len(c.observables)
+	c.Close()
+}
+
+func (c *concatFloat32Subscriber) Complete() {
+	c.observable++
+	if c.observable >= len(c.observables) {
+		c.observer.Complete()
+		c.Close()
+		return
+	}
+	c.observables[c.observable].Subscribe(c)
+}
+
 type concatFloat32Observable struct {
 	observables []Float32Observable
 }
 
-type concatFloat32Observer struct {
-	lock         sync.Mutex
-	observable   int
-	observer     Float32Observer
-	observables  []Float32Observable
-	subscription Subscription
-}
-
-func (c *concatFloat32Observer) concat(next float32, err error, complete bool) {
-	c.lock.Lock()
-	defer c.lock.Unlock()
-	if c.subscription.Unsubscribed() || c.observable >= len(c.observables) {
-		return
-	}
-	switch {
-	case err != nil:
-		c.observer.Error(err)
-		c.observable = len(c.observables)
-	case complete:
-		c.observable++
-		if c.observable >= len(c.observables) {
-			c.observer.Complete()
-			return
-		}
-		c.observables[c.observable].Subscribe(NewFloat32ObserverFunc(c.concat))
-	default:
-		c.observer.Next(next)
-	}
-}
-
 func (m *concatFloat32Observable) Subscribe(observer Float32Observer) Subscription {
-	subscription := NewGenericSubscription()
-	concatObserver := &concatFloat32Observer{
+	if len(m.observables) == 0 {
+		observer.Complete()
+		return ClosedSubscription
+	}
+	subscriber := &concatFloat32Subscriber{
 		observer:     observer,
-		subscription: subscription,
+		Subscription: NewGenericSubscription(),
 		observables:  m.observables,
 	}
-	if len(m.observables) > 0 {
-		m.observables[0].Subscribe(NewFloat32ObserverFunc(concatObserver.concat))
-	} else {
-		subscription.Close()
-	}
-	return subscription
+	m.observables[0].Subscribe(subscriber)
+	return subscriber
 }
 
 func (s *Float32Stream) Concat(observables ...Float32Observable) *Float32Stream {
@@ -2409,6 +2558,7 @@ func (s *Float32Stream) Concat(observables ...Float32Observable) *Float32Stream 
 }
 
 type mergeFloat32Observable struct {
+	delayError  bool
 	observables []Float32Observable
 }
 
@@ -2416,6 +2566,7 @@ func (m *mergeFloat32Observable) Subscribe(observer Float32Observer) Subscriptio
 	subscription := NewGenericSubscription()
 	lock := sync.Mutex{}
 	completed := 0
+	var firstError error
 	relay := func(next float32, err error, complete bool) {
 		lock.Lock()
 		defer lock.Unlock()
@@ -2425,13 +2576,22 @@ func (m *mergeFloat32Observable) Subscribe(observer Float32Observer) Subscriptio
 
 		switch {
 		case err != nil:
-			observer.Error(err)
-			completed = len(m.observables)
+			if m.delayError {
+				firstError = err
+				completed++
+			} else {
+				observer.Error(err)
+				completed = len(m.observables)
+			}
 
 		case complete:
 			completed++
 			if completed == len(m.observables) {
-				observer.Complete()
+				if firstError != nil {
+					observer.Error(firstError)
+				} else {
+					observer.Complete()
+				}
 			}
 		default:
 			observer.Next(next)
@@ -2443,9 +2603,22 @@ func (m *mergeFloat32Observable) Subscribe(observer Float32Observer) Subscriptio
 	return subscription
 }
 
-// Merge an arbitrary
+// Merge an arbitrary number of observables with this one.
+// An error from any of the observables will terminate the merged stream.
 func (s *Float32Stream) Merge(other ...Float32Observable) *Float32Stream {
-	return &Float32Stream{&mergeFloat32Observable{append(other, s)}}
+	if len(other) == 0 {
+		return s
+	}
+	return &Float32Stream{&mergeFloat32Observable{false, append(other, s)}}
+}
+
+// Merge an arbitrary number of observables with this one.
+// Any error will be deferred until all observables terminate.
+func (s *Float32Stream) MergeDelayError(other ...Float32Observable) *Float32Stream {
+	if len(other) == 0 {
+		return s
+	}
+	return &Float32Stream{&mergeFloat32Observable{true, append(other, s)}}
 }
 
 type catchFloat32Observable struct {
@@ -2934,6 +3107,17 @@ type TimeObserver interface {
 	TerminationObserver
 }
 
+// A TimeSubscriber represents a subscribed TimeObserver.
+type TimeSubscriber interface {
+	Subscription
+	TimeObserver
+}
+
+type implTimeSubscriber struct {
+	Subscription
+	TimeObserver
+}
+
 func TimeObserverAsGenericObserver(observer TimeObserver) GenericObserver {
 	return NewGenericObserverFunc(func(next interface{}, err error, complete bool) {
 		switch {
@@ -2977,7 +3161,7 @@ func CreateTime(f func(observer TimeObserver, subscription Subscription)) *TimeS
 func RepeatTime(value time.Time, count int) *TimeStream {
 	return CreateTime(func(observer TimeObserver, subscription Subscription) {
 		for i := 0; i < count; i++ {
-			if subscription.Unsubscribed() {
+			if subscription.Closed() {
 				return
 			}
 			observer.Next(value)
@@ -2986,11 +3170,19 @@ func RepeatTime(value time.Time, count int) *TimeStream {
 	})
 }
 
-// Start creates an observable with the result of a function call.
-func StartTime(f func() time.Time) *TimeStream {
+// StartTime is designed to be used with functions that return a
+// (time.Time, error) tuple.
+//
+// If the error is non-nil the returned TimeStream will be that error,
+// otherwise it will be a single-value stream of time.Time.
+func StartTime(f func() (time.Time, error)) *TimeStream {
 	return CreateTime(func(observer TimeObserver, subscription Subscription) {
-		observer.Next(f())
-		observer.Complete()
+		if v, err := f(); err != nil {
+			observer.Error(err)
+		} else {
+			observer.Next(v)
+			observer.Complete()
+		}
 	})
 }
 
@@ -3005,20 +3197,17 @@ func PassthroughTime(next time.Time, err error, complete bool, observer TimeObse
 	}
 }
 
-type TimeObserverFunc struct {
-	f func(time.Time, error, bool)
-	Subscription
-}
+type TimeObserverFunc func(time.Time, error, bool)
 
 var zeroTime = *new(time.Time)
 
-func NewTimeObserverFunc(f func(time.Time, error, bool)) *TimeObserverFunc {
-	return &TimeObserverFunc{f, NewGenericSubscription()}
+func NewTimeObserverFunc(f func(time.Time, error, bool)) TimeObserverFunc {
+	return f
 }
 
-func (f TimeObserverFunc) Next(next time.Time) { f.f(next, nil, false) }
-func (f TimeObserverFunc) Error(err error)     { f.f(zeroTime, err, false) }
-func (f TimeObserverFunc) Complete()           { f.f(zeroTime, nil, true) }
+func (f TimeObserverFunc) Next(next time.Time) { f(next, nil, false) }
+func (f TimeObserverFunc) Error(err error)     { f(zeroTime, err, false) }
+func (f TimeObserverFunc) Complete()           { f(zeroTime, nil, true) }
 
 type TimeObservable interface {
 	Subscribe(TimeObserver) Subscription
@@ -3055,7 +3244,7 @@ func ThrowTime(err error) *TimeStream {
 func FromTimeArray(array []time.Time) *TimeStream {
 	return CreateTime(func(observer TimeObserver, subscription Subscription) {
 		for _, v := range array {
-			if subscription.Unsubscribed() {
+			if subscription.Closed() {
 				return
 			}
 			observer.Next(v)
@@ -3073,10 +3262,24 @@ func JustTime(element time.Time) *TimeStream {
 	return FromTimeArray([]time.Time{element})
 }
 
+func MergeTime(observables ...TimeObservable) *TimeStream {
+	if len(observables) == 0 {
+		return EmptyTime()
+	}
+	return (&TimeStream{observables[0]}).Merge(observables[1:]...)
+}
+
+func MergeTimeDelayError(observables ...TimeObservable) *TimeStream {
+	if len(observables) == 0 {
+		return EmptyTime()
+	}
+	return (&TimeStream{observables[0]}).MergeDelayError(observables[1:]...)
+}
+
 func FromTimeChannel(ch <-chan time.Time) *TimeStream {
 	return CreateTime(func(observer TimeObserver, subscription Subscription) {
 		for v := range ch {
-			if subscription.Unsubscribed() {
+			if subscription.Closed() {
 				return
 			}
 			observer.Next(v)
@@ -3182,53 +3385,56 @@ func (s *TimeStream) Wait() error {
 	return <-errch
 }
 
+func MakeTimeSubscriber(observer TimeObserver) TimeSubscriber {
+	if subscriber, ok := observer.(TimeSubscriber); ok {
+		return subscriber
+	}
+	return &implTimeSubscriber{NewGenericSubscription(), observer}
+}
+
+type concatTimeSubscriber struct {
+	observable  int
+	observer    TimeObserver
+	observables []TimeObservable
+	Subscription
+}
+
+func (c *concatTimeSubscriber) Next(next time.Time) {
+	c.observer.Next(next)
+}
+
+func (c *concatTimeSubscriber) Error(err error) {
+	c.observer.Error(err)
+	c.observable = len(c.observables)
+	c.Close()
+}
+
+func (c *concatTimeSubscriber) Complete() {
+	c.observable++
+	if c.observable >= len(c.observables) {
+		c.observer.Complete()
+		c.Close()
+		return
+	}
+	c.observables[c.observable].Subscribe(c)
+}
+
 type concatTimeObservable struct {
 	observables []TimeObservable
 }
 
-type concatTimeObserver struct {
-	lock         sync.Mutex
-	observable   int
-	observer     TimeObserver
-	observables  []TimeObservable
-	subscription Subscription
-}
-
-func (c *concatTimeObserver) concat(next time.Time, err error, complete bool) {
-	c.lock.Lock()
-	defer c.lock.Unlock()
-	if c.subscription.Unsubscribed() || c.observable >= len(c.observables) {
-		return
-	}
-	switch {
-	case err != nil:
-		c.observer.Error(err)
-		c.observable = len(c.observables)
-	case complete:
-		c.observable++
-		if c.observable >= len(c.observables) {
-			c.observer.Complete()
-			return
-		}
-		c.observables[c.observable].Subscribe(NewTimeObserverFunc(c.concat))
-	default:
-		c.observer.Next(next)
-	}
-}
-
 func (m *concatTimeObservable) Subscribe(observer TimeObserver) Subscription {
-	subscription := NewGenericSubscription()
-	concatObserver := &concatTimeObserver{
+	if len(m.observables) == 0 {
+		observer.Complete()
+		return ClosedSubscription
+	}
+	subscriber := &concatTimeSubscriber{
 		observer:     observer,
-		subscription: subscription,
+		Subscription: NewGenericSubscription(),
 		observables:  m.observables,
 	}
-	if len(m.observables) > 0 {
-		m.observables[0].Subscribe(NewTimeObserverFunc(concatObserver.concat))
-	} else {
-		subscription.Close()
-	}
-	return subscription
+	m.observables[0].Subscribe(subscriber)
+	return subscriber
 }
 
 func (s *TimeStream) Concat(observables ...TimeObservable) *TimeStream {
@@ -3236,6 +3442,7 @@ func (s *TimeStream) Concat(observables ...TimeObservable) *TimeStream {
 }
 
 type mergeTimeObservable struct {
+	delayError  bool
 	observables []TimeObservable
 }
 
@@ -3243,6 +3450,7 @@ func (m *mergeTimeObservable) Subscribe(observer TimeObserver) Subscription {
 	subscription := NewGenericSubscription()
 	lock := sync.Mutex{}
 	completed := 0
+	var firstError error
 	relay := func(next time.Time, err error, complete bool) {
 		lock.Lock()
 		defer lock.Unlock()
@@ -3252,13 +3460,22 @@ func (m *mergeTimeObservable) Subscribe(observer TimeObserver) Subscription {
 
 		switch {
 		case err != nil:
-			observer.Error(err)
-			completed = len(m.observables)
+			if m.delayError {
+				firstError = err
+				completed++
+			} else {
+				observer.Error(err)
+				completed = len(m.observables)
+			}
 
 		case complete:
 			completed++
 			if completed == len(m.observables) {
-				observer.Complete()
+				if firstError != nil {
+					observer.Error(firstError)
+				} else {
+					observer.Complete()
+				}
 			}
 		default:
 			observer.Next(next)
@@ -3270,9 +3487,22 @@ func (m *mergeTimeObservable) Subscribe(observer TimeObserver) Subscription {
 	return subscription
 }
 
-// Merge an arbitrary
+// Merge an arbitrary number of observables with this one.
+// An error from any of the observables will terminate the merged stream.
 func (s *TimeStream) Merge(other ...TimeObservable) *TimeStream {
-	return &TimeStream{&mergeTimeObservable{append(other, s)}}
+	if len(other) == 0 {
+		return s
+	}
+	return &TimeStream{&mergeTimeObservable{false, append(other, s)}}
+}
+
+// Merge an arbitrary number of observables with this one.
+// Any error will be deferred until all observables terminate.
+func (s *TimeStream) MergeDelayError(other ...TimeObservable) *TimeStream {
+	if len(other) == 0 {
+		return s
+	}
+	return &TimeStream{&mergeTimeObservable{true, append(other, s)}}
 }
 
 type catchTimeObservable struct {

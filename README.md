@@ -39,10 +39,31 @@ gorx --import=gopkg.in/alecthomas/kingpin.v2 kingpinrx '*kingpin.CmdClause' '*ki
 
 # Examples
 
-Simple:
+A very basic example creating an observable from a set of strings and printing
+them:
 
 ```go
 gorx.FromStrings("Ben", "George").Do(func(s string) { fmt.Println(s) }).Wait()
+```
+
+A more complex example, asynchronously retrieving  a set of wikipedia articles
+with a timeout:
+
+```go
+func Get(url string) func () (*http.Response, error) {
+  return func (subscription Subscription) (*http.Response, error) {
+    return http.Get(url)
+  }
+}
+func GetWikipediaArticles(timeout time.Duration, articles...string) *ResponseStream {
+  requests := []ResponseObservable{}
+  for _, article := range articles {
+    request := StartResponse(Get("http://en.wikipedia.org/wiki/" + article)).
+      Timeout(timeout)
+    requests = append(requests, request)
+  }
+  return MergeResponseDelayError(requests...)
+}
 ```
 
 # Operators

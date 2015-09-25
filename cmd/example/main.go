@@ -16,13 +16,13 @@ func main() {
 	fmt.Printf("Filter: %v\n", observable.Filter(func(s string) bool { return s != "three" }).ToArray())
 	fmt.Printf("First: %v\n", observable.First().ToArray())
 	fmt.Printf("Last: %v\n", observable.Last().ToArray())
-	fmt.Printf("MapString: %v\n", rx.IntFromArray([]int{1, 2, 3, 4, 5}).MapString(func(i int) string { return fmt.Sprintf("%d!", i) }).ToArray())
+	fmt.Printf("MapString: %v\n", rx.FromIntArray([]int{1, 2, 3, 4, 5}).MapString(func(i int) string { return fmt.Sprintf("%d!", i) }).ToArray())
 	ch := make(chan int, 5)
 	for i := 0; i < 5; i++ {
 		ch <- i
 	}
 	close(ch)
-	fmt.Printf("Channel: %v\n", rx.IntFromChannel(ch).ToArray())
-	fmt.Printf("IntArray -> Channel -> IntChannel -> Array: %v\n", rx.IntFromChannel(rx.IntFromArray([]int{1, 2, 3, 4}).ToChannel()).ToArray())
-	fmt.Printf("SkipLast: %v\n", rx.IntFromArray([]int{1, 2, 3, 4, 5}).SkipLast(3).ToArray())
+	fmt.Printf("Channel: %v\n", rx.FromIntChannel(ch).ToArray())
+	fmt.Printf("IntArray -> Channel -> IntChannel -> Array: %v\n", rx.FromIntChannel(rx.FromIntArray([]int{1, 2, 3, 4}).ToChannel()).ToArray())
+	fmt.Printf("SkipLast: %v\n", rx.FromIntArray([]int{1, 2, 3, 4, 5}).SkipLast(3).ToArray())
 }
