@@ -11,6 +11,9 @@ Yes, good question. Mostly as an exercise to see if it was feasible/possible.
 It is, largely, except for operators that produce sequence types (ie. arrays
 or observables of T).
 
+That said, the Rx operators *do* provide some nice functionality that would
+otherwise have to be implemented by hand.
+
 # Installation
 
 ```
@@ -50,23 +53,28 @@ A more complex example. Try retrieving article from cache, otherwise fetch
 original from Wikipedia, all with a timeout.
 
 ```go
-// GetCached retrieves a cached HTTP response (or an error if the URL is not cached).
 func GetCached(url string) *ResponseStream
-// SetCached caches the provided HTTP response.
 func SetCached(response *http.Response) *ResponseStream
 
 func Get(url string) *ResponseStream {
-  return StartResponse(func () (*http.Response, error) { return http.Get(url) })
+  return StartResponse(func() (*http.Response, error) { return http.Get(url) })
 }
 
-func GetWikipediaArticles(timeout time.Duration, articles...string) *ResponseStream {
-  requests := []ResponseObservable{}
-  for _, article := range articles {
-    url := "http://en.wikipedia.org/wiki/" + article
-    request :=  GetCached(url).Catch(Get(url)).Timeout(timeout)
-    requests = append(requests, request)
-  }
-  return MergeResponseDelayError(requests...)
+func UrlForArticle(article string) string {
+  return "http://en.wikipedia.org/wiki/" + v
+}
+
+func GetWikipediaArticles(timeout time.Duration, articles ...string) *ResponseStream {
+  return FromStringArray(articles).
+    MapString(UrlForArticle).
+    FlatMapResponse(func(v string) *ResponseStream {
+      // Try cached URL first, then recover with remote URL and
+      // finally recover with an empty stream.
+      return GetCached(url).
+        Catch(Get(url).Timeout(timeout)).
+        Catch(EmptyResponse())
+
+  })
 }
 ```
 
