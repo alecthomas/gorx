@@ -66,7 +66,7 @@ func UrlForArticle(article string) string {
 
 func GetWikipediaArticles(timeout time.Duration, articles ...string) *ResponseStream {
   return FromStringArray(articles).
-    MapString(UrlForArticle).
+    Map(UrlForArticle).
     FlatMapResponse(func(v string) *ResponseStream {
       // Try cached URL first, then recover with remote URL and
       // finally recover with an empty stream.
@@ -136,10 +136,10 @@ resultant types.
 # Combining
 
 - Merge
+- MergeDelayError
 
 Not implemented:
 
-- MergeDelayError
 - CombineLatest
 - And / Then / When
 - Zip
