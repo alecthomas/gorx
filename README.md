@@ -46,20 +46,24 @@ them:
 gorx.FromStrings("Ben", "George").Do(func(s string) { fmt.Println(s) }).Wait()
 ```
 
-A more complex example, asynchronously retrieving  a set of wikipedia articles
-with a timeout:
+A more complex example. Try retrieving article from cache, otherwise fetch
+original from Wikipedia, all with a timeout.
 
 ```go
-func Get(url string) func () (*http.Response, error) {
-  return func (subscription Subscription) (*http.Response, error) {
-    return http.Get(url)
-  }
+// GetCached retrieves a cached HTTP response (or an error if the URL is not cached).
+func GetCached(url string) *ResponseStream
+// SetCached caches the provided HTTP response.
+func SetCached(response *http.Response) *ResponseStream
+
+func Get(url string) *ResponseStream {
+  return StartResponse(func () (*http.Response, error) { return http.Get(url) })
 }
+
 func GetWikipediaArticles(timeout time.Duration, articles...string) *ResponseStream {
   requests := []ResponseObservable{}
   for _, article := range articles {
-    request := StartResponse(Get("http://en.wikipedia.org/wiki/" + article)).
-      Timeout(timeout)
+    url := "http://en.wikipedia.org/wiki/" + article
+    request :=  GetCached(url).Catch(Get(url)).Timeout(timeout)
     requests = append(requests, request)
   }
   return MergeResponseDelayError(requests...)
