@@ -3,6 +3,8 @@ package gorx
 import (
 	"errors"
 	"fmt"
+	"sort"
+	"sync"
 	"testing"
 	"time"
 
@@ -282,11 +284,11 @@ func TestCreate(t *testing.T) {
 
 func TestRange(t *testing.T) {
 	t.Parallel()
-	s := Range(0, 5)
+	s := Range(1, 5)
 	a := s.ToArray()
 	b := s.ToArray()
-	assert.Equal(t, []int{0, 1, 2, 3, 4}, a)
-	assert.Equal(t, []int{0, 1, 2, 3, 4}, b)
+	assert.Equal(t, []int{1, 2, 3, 4, 5}, a)
+	assert.Equal(t, []int{1, 2, 3, 4, 5}, b)
 }
 
 func TestRepeat(t *testing.T) {
@@ -502,4 +504,32 @@ func TestLinkedSubscriptionUnsubscribesTargetOnLink(t *testing.T) {
 	linked.Link(sub)
 	assert.True(t, linked.Closed())
 	assert.True(t, sub.Closed())
+}
+
+func TestFlatMap(t *testing.T) {
+	t.Parallel()
+	actual := Range(1, 2).FlatMap(func(n int) IntObservable { return Range(n, 2) }).ToArray()
+	sort.Ints(actual)
+	assert.Equal(t, []int{1, 2, 2, 3}, actual)
+}
+
+func TestTimeout(t *testing.T) {
+	t.Parallel()
+	wg := sync.WaitGroup{}
+	start := time.Now()
+	wg.Add(1)
+	actual, err := CreateInt(func(observer IntObserver, subscription Subscription) {
+		observer.Next(1)
+		time.Sleep(time.Millisecond * 500)
+		assert.True(t, subscription.Closed())
+		wg.Done()
+	}).
+		Timeout(time.Millisecond * 250).
+		ToArrayWithError()
+	elapsed := time.Now().Sub(start)
+	assert.Error(t, err)
+	assert.Equal(t, ErrTimeout, err)
+	assert.True(t, elapsed > time.Millisecond*250 && elapsed < time.Millisecond*500)
+	assert.Equal(t, []int{1}, actual)
+	wg.Wait()
 }

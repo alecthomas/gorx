@@ -52,7 +52,10 @@ import (
 {{end}}\
 )
 
-// Maximum size of a replay buffer. Can be modified.
+// ErrTimeout is delivered to an observer if the stream times out.
+var ErrTimeout = errors.New("timeout")
+
+// MaxReplaySize is the maximum size of a replay buffer. Can be modified.
 var MaxReplaySize = {{.MaxReplaySize}}
 
 // A Subscription to an observable.
@@ -118,7 +121,7 @@ func (l *LinkedSubscription) Closed() bool {
 // unsubscribed.
 type ChannelSubscription chan struct{}
 
-func NewChannelSubscription() Subscription {
+func NewChannelSubscription() ChannelSubscription {
 	return make(ChannelSubscription)
 }
 
@@ -181,6 +184,21 @@ type GenericObservableFilter func(next interface{}, err error, complete bool, ob
 
 // Turtles all the way down!
 type GenericObservableFilterFactory func(GenericObserver) GenericObservableFilter
+
+func ignoreCompletionFilter() GenericObservableFilterFactory {
+	return func(GenericObserver) GenericObservableFilter {
+		return func(next interface{}, err error, complete bool, observer GenericObserver) {
+			switch {
+			case err != nil:
+				observer.Error(err)
+			case complete:
+				break
+			default:
+				observer.Next(next)
+			}
+		}
+	}
+}
 
 func distinctFilter() GenericObservableFilterFactory {
 	return func(GenericObserver) GenericObservableFilter {
@@ -555,7 +573,8 @@ func replayFilter(size int, duration time.Duration) GenericObservableFilterFacto
 	}
 }
 
-func Range(start, end int) *IntStream {
+func Range(start, count int) *IntStream {
+	end := start + count
 	return CreateInt(func(observer IntObserver, subscription Subscription) {
 		for i := start; i < end; i++ {
 			if subscription.Closed() {
@@ -614,7 +633,7 @@ func {{$name}}ObserverAsGenericObserver(observer {{$name}}Observer) GenericObser
 }
 
 func GenericObserverAs{{$name}}Observer(observer GenericObserver) {{$name}}Observer {
-	return New{{$name}}ObserverFunc(func(next {{$type}}, err error, complete bool) {
+	return {{$name}}ObserverFunc(func(next {{$type}}, err error, complete bool) {
 		switch {
 		case err != nil:
 			observer.Error(err)
@@ -679,13 +698,9 @@ func Passthrough{{$name}}(next {{$type}}, err error, complete bool, observer {{$
 	}
 }
 
-type {{$name}}ObserverFunc func({{$type}}, error, bool)
-
 var zero{{$name}} = *new({{$type}})
 
-func New{{$name}}ObserverFunc(f func({{$type}}, error, bool)) {{$name}}ObserverFunc {
-	return f
-}
+type {{$name}}ObserverFunc func({{$type}}, error, bool)
 
 func (f {{$name}}ObserverFunc) Next(next {{$type}}) { f(next, nil, false) }
 func (f {{$name}}ObserverFunc) Error(err error)  { f(zero{{$name}}, err, false) }
@@ -779,7 +794,7 @@ func From{{$name}}Observable(observable {{$name}}Observable) *{{$name}}Stream {
 }
 
 func (s *{{$name}}Stream) SubscribeFunc(f func({{$type}}, error, bool)) Subscription {
-	return s.Subscribe(New{{$name}}ObserverFunc(f))
+	return s.Subscribe({{$name}}ObserverFunc(f))
 }
 
 func (s *{{$name}}Stream) SubscribeNext(f func (v {{$type}})) Subscription {
@@ -964,7 +979,7 @@ func (m *merge{{$name}}Observable) Subscribe(observer {{$name}}Observer) Subscri
 		}
 	}
 	for _, observable := range m.observables {
-		observable.Subscribe(New{{$name}}ObserverFunc(relay))
+		observable.Subscribe({{$name}}ObserverFunc(relay))
 	}
 	return subscription
 }
@@ -1004,7 +1019,7 @@ func (r *catch{{$name}}Observable) Subscribe(observer {{$name}}Observer) Subscri
 			observer.Next(next)
 		}
 	}
-	r.parent.Subscribe(New{{$name}}ObserverFunc(run))
+	r.parent.Subscribe({{$name}}ObserverFunc(run))
 	return subscription
 }
 
@@ -1024,7 +1039,7 @@ type retry{{$name}}Observer struct {
 func (r *retry{{$name}}Observer) retry(next {{$type}}, err error, complete bool) {
 	switch {
 	case err != nil:
-		r.observable.Subscribe(New{{$name}}ObserverFunc(r.retry))
+		r.observable.Subscribe({{$name}}ObserverFunc(r.retry))
 	case complete:
 		r.observer.Complete()
 	default:
@@ -1035,7 +1050,7 @@ func (r *retry{{$name}}Observer) retry(next {{$type}}, err error, complete bool)
 func (r *retry{{$name}}Observable) Subscribe(observer {{$name}}Observer) Subscription {
 	subscription := NewGenericSubscription()
 	ro := &retry{{$name}}Observer{r.observable, observer}
-	r.observable.Subscribe(New{{$name}}ObserverFunc(ro.retry))
+	r.observable.Subscribe({{$name}}ObserverFunc(ro.retry))
 	return subscription
 }
 
@@ -1100,6 +1115,32 @@ func (s *{{$name}}Stream) Scan(initial {{$type}}, f func ({{$type}}, {{$type}}) 
 			observer.Next(value)
 		}
 	}))
+}
+
+type timeout{{$name}} struct {
+	parent {{$name}}Observable
+	timeout time.Duration
+}
+
+func (t *timeout{{$name}}) Subscribe(observer {{$name}}Observer) Subscription {
+	subscription := NewChannelSubscription()
+	cancel := t.parent.Subscribe(observer)
+	go func() {
+		select {
+		case <-time.After(t.timeout):
+			observer.Error(ErrTimeout)
+			_ = cancel.Close()
+			_ = subscription.Close()
+		case <-subscription:
+			_ = cancel.Close()
+		}
+	}()
+	return subscription
+}
+
+func (s *{{$name}}Stream) Timeout(timeout time.Duration) *{{$name}}Stream {
+	return &{{$name}}Stream{&timeout{{$name}}{s, timeout}}
+
 }
 
 // ToOneWithError blocks until the stream emits exactly one value. Otherwise, it errors.
@@ -1302,6 +1343,13 @@ type Mapping{{$mapName}}Observable struct {
 	mapper Mapping{{$mapName}}FuncFactory
 }
 
+func (f *Mapping{{$mapName}}Observable) Subscribe(observer {{$otherName}}Observer) Subscription {
+	mapper := f.mapper(observer)
+	return f.parent.Subscribe({{$name}}ObserverFunc(func(next {{$type}}, err error, complete bool) {
+		mapper(next, err, complete, observer)
+	}))
+}
+
 func Map{{$mapName}}Observable(parent {{$name}}Observable, mapper Mapping{{$mapName}}FuncFactory) {{$otherName}}Observable {
 	return &Mapping{{$mapName}}Observable{
 		parent:  parent,
@@ -1328,25 +1376,54 @@ func Map{{$mapName}}ObserveNext(parent {{$name}}Observable, mapper func({{$type}
 	)
 }
 
-func (f *Mapping{{$mapName}}Observable) Subscribe(observer {{$otherName}}Observer) Subscription {
-	mapper := f.mapper(observer)
-	return f.parent.Subscribe(New{{$name}}ObserverFunc(func(next {{$type}}, err error, complete bool) {
-		mapper(next, err, complete, observer)
-	}))
+type flatMap{{$mapName}} struct {
+	parent {{$name}}Observable
+	mapper func ({{$type}}) {{$otherName}}Observable
 }
-{{end}}
+
+func (f *flatMap{{$mapName}}) Subscribe(observer {{$otherName}}Observer) Subscription {
+	subscription := NewGenericSubscription()
+	wg := sync.WaitGroup{}
+	f.parent.Subscribe({{$name}}ObserverFunc(func (next {{$type}}, err error, complete bool) {
+		switch {
+		case err != nil:
+			wg.Wait()
+			observer.Error(err)
+		case complete:
+			wg.Wait()
+			observer.Complete()
+		default:
+			wg.Add(1)
+			observable := f.mapper(next)
+			stream := (&{{$otherName}}Stream{observable}).
+				DoOnComplete(func() { wg.Done() }).
+				DoOnError(func(error) { wg.Done() })
+			stream = &{{$otherName}}Stream{ignoreCompletionFilter().{{$otherName}}(stream)}
+			stream.Subscribe(observer)
+		}
+	}))
+	return subscription
+}
 
 {{if ne $type $other}}
 // Map{{$otherName}} maps this stream to an {{$otherName}}Stream via f.
 func (s *{{$name}}Stream) Map{{$otherName}}(f func ({{$type}}) {{$other}}) *{{$otherName}}Stream {
-	return From{{$otherName}}Observable(Map{{$name}}2{{$otherName}}ObserveNext(s, f))
+	return From{{$otherName}}Observable(Map{{$mapName}}ObserveNext(s, f))
+}
+
+func (s *{{$name}}Stream) FlatMap{{$otherName}}(f func ({{$type}}) {{$otherName}}Observable) *{{$otherName}}Stream {
+	return &{{$otherName}}Stream{&flatMap{{$mapName}}{s, f}}
 }
 {{else}}\
-
 // Map maps values in this stream to another value.
 func (s *{{$name}}Stream) Map(f func ({{$type}}) {{$other}}) *{{$name}}Stream {
-	return From{{$name}}Observable(Map{{$name}}2{{$name}}ObserveNext(s, f))
+	return From{{$name}}Observable(Map{{$mapName}}ObserveNext(s, f))
 }
+
+func (s *{{$name}}Stream) FlatMap(f func ({{$type}}) {{$name}}Observable) *{{$name}}Stream {
+	return &{{$name}}Stream{&flatMap{{$mapName}}{s, f}}
+}
+{{end}}
 {{end}}
 {{end}}\
 {{end}}

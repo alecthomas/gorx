@@ -49,31 +49,49 @@ them:
 gorx.FromStrings("Ben", "George").Do(func(s string) { fmt.Println(s) }).Wait()
 ```
 
-A more complex example. Try retrieving article from cache, otherwise fetch
+A more [complex example](examples/complex/main.go). Try retrieving article from cache, otherwise fetch
 original from Wikipedia, all with a timeout.
 
 ```go
-func GetCached(url string) *ResponseStream
-func SetCached(response *http.Response) *ResponseStream
-
-func Get(url string) *ResponseStream {
-  return StartResponse(func() (*http.Response, error) { return http.Get(url) })
+func GetCached(url string) *ResponseStream {
+  fmt.Printf("No cache entry for %s\n", url)
+  return ThrowResponse(errors.New("not implemented"))
+}
+func SetCached(response *http.Response) {
+  fmt.Printf("Caching %s\n", response.Request.URL)
 }
 
-func UrlForArticle(article string) string {
-  return "http://en.wikipedia.org/wiki/" + v
+func Get(url string) *ResponseStream {
+  return StartResponse(func() (*http.Response, error) {
+    response, err := http.Get(url)
+    if err == nil && (response.StatusCode < 200 || response.StatusCode > 299) {
+      return nil, errors.New(http.StatusText(response.StatusCode))
+    }
+    return response, err
+  })
+}
+
+func URLForArticle(article string) string {
+  return "http://en.wikipedia.org/wiki/" + article
+}
+
+func LogError(err error) {
+  fmt.Printf("error: %s\n", err)
 }
 
 func GetWikipediaArticles(timeout time.Duration, articles ...string) *ResponseStream {
+  // Try cached URL first, then recover with remote URL and
+  // finally recover with an empty stream.
   return FromStringArray(articles).
-    Map(UrlForArticle).
-    FlatMapResponse(func(v string) *ResponseStream {
-      // Try cached URL first, then recover with remote URL and
-      // finally recover with an empty stream.
-      return GetCached(url).
-        Catch(Get(url).Timeout(timeout)).
-        Catch(EmptyResponse())
-
+    Map(URLForArticle).
+    FlatMapResponse(func(url string) ResponseObservable {
+    remote := Get(url).
+      Timeout(timeout).
+      Do(SetCached).
+      DoOnError(LogError).
+      Catch(EmptyResponse())
+    return GetCached(url).
+      Catch(remote)
   })
 }
 ```
@@ -103,11 +121,11 @@ Not implemented:
 - Map
 - Reduce
 - Scan
+- FlatMap
 
 Not implemented:
 
 - Buffer
-- FlatMap
 - GroupBy
 - Window
 
