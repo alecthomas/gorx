@@ -66,6 +66,11 @@ type Subscription interface {
 	Closed() bool
 }
 
+// SubscriptionEvents provides lifecycle event callbacks for a Subscription.
+type SubscriptionEvents interface {
+	OnUnsubscribe(func ())
+}
+
 // A Subscription that is already closed.
 type closedSubscription struct {}
 func (closedSubscription) Close() error { return nil }
@@ -138,6 +143,12 @@ func (c ChannelSubscription) Closed() bool {
 	default:
 		return false
 	}
+}
+func (c ChannelSubscription) OnUnsubscribe(handler func ()) {
+	go func() {
+		<-c
+		handler()
+	}()
 }
 
 // GenericSubscription is implemented with atomic operations.

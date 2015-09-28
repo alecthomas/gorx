@@ -506,6 +506,21 @@ func TestLinkedSubscriptionUnsubscribesTargetOnLink(t *testing.T) {
 	assert.True(t, sub.Closed())
 }
 
+func TestChannelSubscription(t *testing.T) {
+	t.Parallel()
+	done := make(chan bool)
+	unsubscribed := false
+	var s Subscription = NewChannelSubscription()
+	events, ok := s.(SubscriptionEvents)
+	assert.True(t, ok)
+	events.OnUnsubscribe(func() { unsubscribed = true; done <- true })
+	assert.False(t, s.Closed())
+	s.Close()
+	assert.True(t, s.Closed())
+	<-done
+	assert.True(t, unsubscribed)
+}
+
 func TestFlatMap(t *testing.T) {
 	t.Parallel()
 	actual := Range(1, 2).FlatMap(func(n int) IntObservable { return Range(n, 2) }).ToArray()
