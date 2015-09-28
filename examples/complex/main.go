@@ -9,7 +9,7 @@ import (
 	"net/http"
 	"time"
 
-	. "github.com/alecthomas/gorx/example/complex/rx"
+	. "github.com/alecthomas/gorx/examples/complex/rx"
 )
 
 func GetCached(url string) *ResponseStream {
@@ -21,12 +21,17 @@ func SetCached(response *http.Response) {
 }
 
 func Get(url string) *ResponseStream {
-	return StartResponse(func() (*http.Response, error) {
+	return CreateResponse(func(observer ResponseObserver, subscription Subscription) {
 		response, err := http.Get(url)
-		if err == nil && (response.StatusCode < 200 || response.StatusCode > 299) {
-			return nil, errors.New(http.StatusText(response.StatusCode))
+		if err != nil {
+			observer.Error(err)
 		}
-		return response, err
+		if response.StatusCode < 200 || response.StatusCode > 299 {
+			observer.Error(errors.New(http.StatusText(response.StatusCode)))
+			return
+		}
+		observer.Next(response)
+		observer.Complete()
 	})
 }
 

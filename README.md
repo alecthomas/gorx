@@ -85,14 +85,14 @@ func GetWikipediaArticles(timeout time.Duration, articles ...string) *ResponseSt
   return FromStringArray(articles).
     Map(URLForArticle).
     FlatMapResponse(func(url string) ResponseObservable {
-    remote := Get(url).
-      Timeout(timeout).
-      Do(SetCached).
-      DoOnError(LogError).
-      Catch(EmptyResponse())
-    return GetCached(url).
-      Catch(remote)
-  })
+      remote := Get(url).
+        Timeout(timeout).
+        Do(SetCached).
+        DoOnError(LogError).
+        Catch(EmptyResponse())
+      return GetCached(url).
+        Catch(remote)
+    })
 }
 ```
 
