@@ -15,8 +15,6 @@ func add(a, b int) int {
 	return a + b
 }
 
-//go:generate go run ./cmd/gorx/main.go --base-types -o gorx.go gorx
-
 func TestFromAndToArray(t *testing.T) {
 	a := []int{1, 2, 3, 4, 5}
 	b := FromIntArray(a).ToArray()
