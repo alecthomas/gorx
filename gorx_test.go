@@ -8,7 +8,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/stretchr/testify/assert"
+	"github.com/alecthomas/assert"
 )
 
 func add(a, b int) int {
@@ -547,4 +547,20 @@ func TestTimeout(t *testing.T) {
 	assert.True(t, elapsed > time.Millisecond*250 && elapsed < time.Millisecond*500)
 	assert.Equal(t, []int{1}, actual)
 	wg.Wait()
+}
+
+func TestFork(t *testing.T) {
+	ch := make(chan int, 30)
+	s := FromIntChannel(ch).Fork()
+	a := []int{}
+	b := []int{}
+	s.SubscribeNext(func(n int) { a = append(a, n) })
+	s.SubscribeNext(func(n int) { b = append(b, n) })
+	ch <- 1
+	ch <- 2
+	ch <- 3
+	close(ch)
+	s.Wait()
+	assert.Equal(t, []int{1, 2, 3}, a)
+	assert.Equal(t, []int{1, 2, 3}, b)
 }
