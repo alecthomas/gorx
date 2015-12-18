@@ -18,26 +18,22 @@ func add(a, b int) int {
 //go:generate go run ./cmd/gorx/main.go --base-types -o gorx.go gorx
 
 func TestFromAndToArray(t *testing.T) {
-	t.Parallel()
 	a := []int{1, 2, 3, 4, 5}
 	b := FromIntArray(a).ToArray()
 	assert.Equal(t, a, b)
 }
 
 func TestJust(t *testing.T) {
-	t.Parallel()
 	a := JustInt(1).ToArray()
 	assert.Equal(t, []int{1}, a)
 }
 
 func TestDistinct(t *testing.T) {
-	t.Parallel()
 	a := FromInts(1, 1, 2, 2, 3, 2, 4, 5).Distinct().ToArray()
 	assert.Equal(t, []int{1, 2, 3, 4, 5}, a)
 }
 
 func TestResubscribe(t *testing.T) {
-	t.Parallel()
 	expected := []int{1, 2, 3, 4}
 	actual := FromIntArray(expected)
 	assert.Equal(t, actual.ToArray(), expected)
@@ -45,32 +41,27 @@ func TestResubscribe(t *testing.T) {
 }
 
 func TestElementAt(t *testing.T) {
-	t.Parallel()
 	a := FromInts(1, 2, 3, 4).ElementAt(2).ToArray()
 	assert.Equal(t, []int{3}, a)
 }
 
 func TestFilter(t *testing.T) {
-	t.Parallel()
 	even := func(i int) bool { return i%2 == 0 }
 	a := FromInts(1, 2, 3, 4, 5, 6, 7, 8).Filter(even).ToArray()
 	assert.Equal(t, []int{2, 4, 6, 8}, a)
 }
 
 func TestFirst(t *testing.T) {
-	t.Parallel()
 	a := FromInts(1, 2, 3, 4).First().ToArray()
 	assert.Equal(t, a, []int{1})
 }
 
 func TestLast(t *testing.T) {
-	t.Parallel()
 	a := FromInts(1, 2, 3, 4).Last().ToArray()
 	assert.Equal(t, a, []int{4})
 }
 
 func TestMap(t *testing.T) {
-	t.Parallel()
 	a := FromInts(1, 2, 3, 4).MapString(func(i int) string { return fmt.Sprintf("%d!", i) }).ToArray()
 	assert.Equal(t, a, []string{"1!", "2!", "3!", "4!"})
 }
@@ -86,13 +77,11 @@ func FromTestChannel(t *testing.T) {
 }
 
 func TestSkipLast(t *testing.T) {
-	t.Parallel()
 	a := FromInts(1, 2, 3, 4, 5).SkipLast(2).ToArray()
 	assert.Equal(t, []int{1, 2, 3}, a)
 }
 
 func TestUnsubscribe(t *testing.T) {
-	t.Parallel()
 	s := NewGenericSubscription()
 	assert.False(t, s.Closed())
 	s.Close()
@@ -100,37 +89,31 @@ func TestUnsubscribe(t *testing.T) {
 }
 
 func TestAverageInt(t *testing.T) {
-	t.Parallel()
 	a := FromInts(1, 2, 3, 4, 5).Average().ToArray()
 	assert.Equal(t, []int{3}, a)
 }
 
 func TestAverageFloat32(t *testing.T) {
-	t.Parallel()
 	b := FromFloat32s(1, 2, 3, 4).Average().ToArray()
 	assert.Equal(t, []float32{2.5}, b)
 }
 
 func TestSumInt(t *testing.T) {
-	t.Parallel()
 	a := FromInts(1, 2, 3, 4, 5).Sum().ToArray()
 	assert.Equal(t, []int{15}, a)
 }
 
 func TestSumFloat32(t *testing.T) {
-	t.Parallel()
 	a := FromFloat32s(1, 2, 3, 4.5).Sum().ToArray()
 	assert.Equal(t, []float32{10.5}, a)
 }
 
 func TestCount(t *testing.T) {
-	t.Parallel()
 	a := FromInts(1, 2, 3, 4, 5, 6, 7).Count().ToArray()
 	assert.Equal(t, []int{7}, a)
 }
 
 func TestToOneWithError(t *testing.T) {
-	t.Parallel()
 	_, err := FromInts(1, 2).ToOneWithError()
 	assert.Error(t, err)
 	value, err := FromInts(3).ToOneWithError()
@@ -139,7 +122,6 @@ func TestToOneWithError(t *testing.T) {
 }
 
 // func TestToOneWithErrorCancelsSubscription(t *testing.T) {
-// t.Parallel()
 // 	var sub Subscription
 // 	o := CreateInt(func(observer IntObserver, subscription Subscription) {
 // 		sub = subscription
@@ -153,21 +135,18 @@ func TestToOneWithError(t *testing.T) {
 // }
 
 func TestMin(t *testing.T) {
-	t.Parallel()
 	value, err := FromInts(5, 4, 3, 2, 1, 2, 3, 4, 5).Min().ToOneWithError()
 	assert.NoError(t, err)
 	assert.Equal(t, 1, value)
 }
 
 func TestMax(t *testing.T) {
-	t.Parallel()
 	value, err := FromInts(4, 5, 4, 3, 2, 1, 2).Max().ToOneWithError()
 	assert.NoError(t, err)
 	assert.Equal(t, 5, value)
 }
 
 func TestToChannel(t *testing.T) {
-	t.Parallel()
 	expected := []int{1, 2, 3, 4, 5, 4, 3, 2, 1}
 	a := FromIntArray(expected).ToChannel()
 	b := []int{}
@@ -178,13 +157,11 @@ func TestToChannel(t *testing.T) {
 }
 
 func TestReduce(t *testing.T) {
-	t.Parallel()
 	a := FromInts(1, 2, 3, 4, 5).Reduce(0, add).ToOne()
 	assert.Equal(t, 15, a)
 }
 
 func TestDo(t *testing.T) {
-	t.Parallel()
 	b := []int{}
 	a := FromInts(1, 2, 3, 4, 5).Do(func(v int) {
 		b = append(b, v)
@@ -193,27 +170,23 @@ func TestDo(t *testing.T) {
 }
 
 func TestThrow(t *testing.T) {
-	t.Parallel()
 	_, err := ThrowInt(errors.New("error")).ToArrayWithError()
 	assert.Error(t, err)
 }
 
 func TestEmpty(t *testing.T) {
-	t.Parallel()
 	a, err := EmptyInt().ToArrayWithError()
 	assert.NoError(t, err)
 	assert.Equal(t, []int{}, a)
 }
 
 func TestDoOnError(t *testing.T) {
-	t.Parallel()
 	var oerr error
 	_, err := ThrowInt(errors.New("error")).DoOnError(func(err error) { oerr = err }).ToArrayWithError()
 	assert.Equal(t, err, oerr)
 }
 
 func TestDoOnComplete(t *testing.T) {
-	t.Parallel()
 	complete := false
 	a, err := EmptyInt().DoOnComplete(func() { complete = true }).ToArrayWithError()
 	assert.NoError(t, err)
@@ -222,7 +195,6 @@ func TestDoOnComplete(t *testing.T) {
 }
 
 func TestReplay(t *testing.T) {
-	t.Parallel()
 	ch := make(chan int, 5)
 	for i := 0; i < 5; i++ {
 		ch <- i
@@ -237,7 +209,6 @@ func TestReplay(t *testing.T) {
 }
 
 func TestReplayWithSize(t *testing.T) {
-	t.Parallel()
 	ch := make(chan int, 5)
 	for i := 0; i < 5; i++ {
 		ch <- i
@@ -252,7 +223,6 @@ func TestReplayWithSize(t *testing.T) {
 }
 
 func TestReplayWithExpiry(t *testing.T) {
-	t.Parallel()
 	ch := make(chan int)
 	go func() {
 		for i := 0; i < 5; i++ {
@@ -269,7 +239,6 @@ func TestReplayWithExpiry(t *testing.T) {
 }
 
 func TestCreate(t *testing.T) {
-	t.Parallel()
 	s := CreateInt(func(observer IntObserver, subscription Subscription) {
 		observer.Next(0)
 		observer.Next(1)
@@ -283,7 +252,6 @@ func TestCreate(t *testing.T) {
 }
 
 func TestRange(t *testing.T) {
-	t.Parallel()
 	s := Range(1, 5)
 	a := s.ToArray()
 	b := s.ToArray()
@@ -292,7 +260,6 @@ func TestRange(t *testing.T) {
 }
 
 func TestRepeat(t *testing.T) {
-	t.Parallel()
 	s := RepeatInt(5, 3)
 	a := s.ToArray()
 	b := s.ToArray()
@@ -301,7 +268,6 @@ func TestRepeat(t *testing.T) {
 }
 
 func TestStart(t *testing.T) {
-	t.Parallel()
 	s := StartInt(func() (int, error) { return 42, nil })
 	a := s.ToArray()
 	b := s.ToArray()
@@ -310,20 +276,17 @@ func TestStart(t *testing.T) {
 }
 
 func TestStartWithError(t *testing.T) {
-	t.Parallel()
 	s := StartInt(func() (int, error) { return 0, errors.New("error") })
 	_, err := s.ToArrayWithError()
 	assert.Error(t, err)
 }
 
 func TestScan(t *testing.T) {
-	t.Parallel()
 	a := FromInts(1, 2, 3, 4, 5).Scan(0, add).ToArray()
 	assert.Equal(t, []int{1, 3, 6, 10, 15}, a)
 }
 
 func TestSubscribeNext(t *testing.T) {
-	t.Parallel()
 	wait := make(chan bool)
 	a := []int{}
 	_ = FromInts(1, 2, 3, 4, 5).
@@ -334,7 +297,6 @@ func TestSubscribeNext(t *testing.T) {
 }
 
 func TestTake(t *testing.T) {
-	t.Parallel()
 	s := FromInts(1, 2, 3, 4, 5)
 	a := s.Take(2).ToArray()
 	b := s.Take(3).ToArray()
@@ -343,7 +305,6 @@ func TestTake(t *testing.T) {
 }
 
 func TestTakeLast(t *testing.T) {
-	t.Parallel()
 	s := FromInts(1, 2, 3, 4, 5)
 	a := s.TakeLast(2).ToArray()
 	b := s.TakeLast(3).ToArray()
@@ -352,7 +313,6 @@ func TestTakeLast(t *testing.T) {
 }
 
 func TestIgnoreElements(t *testing.T) {
-	t.Parallel()
 	s := FromInts(1, 2, 3, 4, 5)
 	a := s.IgnoreElements().ToArray()
 	assert.Equal(t, []int{}, a)
@@ -364,7 +324,6 @@ type tiStruct struct {
 }
 
 func TestInterval(t *testing.T) {
-	t.Parallel()
 	seen := []tiStruct{}
 	last := time.Now()
 	wait := make(chan bool)
@@ -383,13 +342,11 @@ func TestInterval(t *testing.T) {
 }
 
 func TestSample(t *testing.T) {
-	t.Parallel()
 	a := Interval(time.Millisecond * 90).Sample(time.Millisecond * 200).Take(3).ToArray()
 	assert.Equal(t, []int{1, 3, 5}, a)
 }
 
 func TestDebounce(t *testing.T) {
-	t.Parallel()
 	s := CreateInt(func(observer IntObserver, subscription Subscription) {
 		time.Sleep(100 * time.Millisecond)
 		observer.Next(1)
@@ -406,7 +363,6 @@ func TestDebounce(t *testing.T) {
 }
 
 func TestMerge(t *testing.T) {
-	t.Parallel()
 	sa := CreateInt(func(observer IntObserver, subscription Subscription) {
 		time.Sleep(10 * time.Millisecond)
 		observer.Next(1)
@@ -426,7 +382,6 @@ func TestMerge(t *testing.T) {
 }
 
 func TestMergeDelayError(t *testing.T) {
-	t.Parallel()
 	sa := CreateInt(func(observer IntObserver, subscription Subscription) {
 		time.Sleep(10 * time.Millisecond)
 		observer.Next(1)
@@ -444,7 +399,6 @@ func TestMergeDelayError(t *testing.T) {
 }
 
 func TestConcat(t *testing.T) {
-	t.Parallel()
 	a := []int{1, 2, 3}
 	b := []int{4, 5}
 	c := []int{6, 7}
@@ -455,7 +409,6 @@ func TestConcat(t *testing.T) {
 }
 
 func TestRecover(t *testing.T) {
-	t.Parallel()
 	merged := FromInts(1, 2, 3).
 		Concat(ThrowInt(errors.New("error"))).
 		Catch(FromInts(4, 5))
@@ -463,7 +416,6 @@ func TestRecover(t *testing.T) {
 }
 
 func TestRetry(t *testing.T) {
-	t.Parallel()
 	errored := false
 	a := CreateInt(func(observer IntObserver, subscription Subscription) {
 		observer.Next(1)
@@ -482,7 +434,6 @@ func TestRetry(t *testing.T) {
 }
 
 func TestLinkedSubscription(t *testing.T) {
-	t.Parallel()
 	linked := NewLinkedSubscription()
 	sub := NewGenericSubscription()
 	assert.False(t, linked.Closed())
@@ -495,7 +446,6 @@ func TestLinkedSubscription(t *testing.T) {
 }
 
 func TestLinkedSubscriptionUnsubscribesTargetOnLink(t *testing.T) {
-	t.Parallel()
 	linked := NewLinkedSubscription()
 	sub := NewGenericSubscription()
 	linked.Close()
@@ -507,7 +457,6 @@ func TestLinkedSubscriptionUnsubscribesTargetOnLink(t *testing.T) {
 }
 
 func TestChannelSubscription(t *testing.T) {
-	t.Parallel()
 	done := make(chan bool)
 	unsubscribed := false
 	var s Subscription = NewChannelSubscription()
@@ -522,14 +471,12 @@ func TestChannelSubscription(t *testing.T) {
 }
 
 func TestFlatMap(t *testing.T) {
-	t.Parallel()
 	actual := Range(1, 2).FlatMap(func(n int) IntObservable { return Range(n, 2) }).ToArray()
 	sort.Ints(actual)
 	assert.Equal(t, []int{1, 2, 2, 3}, actual)
 }
 
 func TestTimeout(t *testing.T) {
-	t.Parallel()
 	wg := sync.WaitGroup{}
 	start := time.Now()
 	wg.Add(1)
