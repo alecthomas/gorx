@@ -1,4 +1,4 @@
-# Reactive eXtensions for Go
+# Reactive eXtensions for Go [![](https://godoc.org/github.com/alecthomas/gorx?status.png)](http://godoc.org/github.com/alecthomas/gorx) [![Build Status](https://travis-ci.org/alecthomas/gorx.png)](https://travis-ci.org/alecthomas/gorx)
 
 This is a package and tool providing [Reactive eXtensions](http://reactivex.io) for Go.
 
