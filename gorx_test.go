@@ -3,6 +3,7 @@ package gorx
 import (
 	"errors"
 	"fmt"
+	"runtime"
 	"sort"
 	"sync"
 	"testing"
@@ -81,9 +82,9 @@ func TestSkipLast(t *testing.T) {
 
 func TestUnsubscribe(t *testing.T) {
 	s := NewGenericSubscription()
-	assert.False(t, s.Closed())
-	s.Close()
-	assert.True(t, s.Closed())
+	assert.False(t, s.Disposed())
+	s.Dispose()
+	assert.True(t, s.Disposed())
 }
 
 func TestAverageInt(t *testing.T) {
@@ -129,7 +130,7 @@ func TestToOneWithError(t *testing.T) {
 // 	})
 // 	_, err := o.ToOneWithError()
 // 	assert.Error(t, err)
-// 	assert.True(t, sub.Closed())
+// 	assert.True(t, sub.Disposed())
 // }
 
 func TestMin(t *testing.T) {
@@ -434,24 +435,24 @@ func TestRetry(t *testing.T) {
 func TestLinkedSubscription(t *testing.T) {
 	linked := NewLinkedSubscription()
 	sub := NewGenericSubscription()
-	assert.False(t, linked.Closed())
-	assert.False(t, sub.Closed())
+	assert.False(t, linked.Disposed())
+	assert.False(t, sub.Disposed())
 	linked.Link(sub)
 	assert.Panics(t, func() { linked.Link(sub) })
-	linked.Close()
-	assert.True(t, sub.Closed())
-	assert.True(t, linked.Closed())
+	linked.Dispose()
+	assert.True(t, sub.Disposed())
+	assert.True(t, linked.Disposed())
 }
 
 func TestLinkedSubscriptionUnsubscribesTargetOnLink(t *testing.T) {
 	linked := NewLinkedSubscription()
 	sub := NewGenericSubscription()
-	linked.Close()
-	assert.True(t, linked.Closed())
-	assert.False(t, sub.Closed())
+	linked.Dispose()
+	assert.True(t, linked.Disposed())
+	assert.False(t, sub.Disposed())
 	linked.Link(sub)
-	assert.True(t, linked.Closed())
-	assert.True(t, sub.Closed())
+	assert.True(t, linked.Disposed())
+	assert.True(t, sub.Disposed())
 }
 
 func TestChannelSubscription(t *testing.T) {
@@ -461,9 +462,9 @@ func TestChannelSubscription(t *testing.T) {
 	events, ok := s.(SubscriptionEvents)
 	assert.True(t, ok)
 	events.OnUnsubscribe(func() { unsubscribed = true; done <- true })
-	assert.False(t, s.Closed())
-	s.Close()
-	assert.True(t, s.Closed())
+	assert.False(t, s.Disposed())
+	s.Dispose()
+	assert.True(t, s.Disposed())
 	<-done
 	assert.True(t, unsubscribed)
 }
@@ -481,7 +482,7 @@ func TestTimeout(t *testing.T) {
 	actual, err := CreateInt(func(observer IntObserver, subscription Subscription) {
 		observer.Next(1)
 		time.Sleep(time.Millisecond * 500)
-		assert.True(t, subscription.Closed())
+		assert.True(t, subscription.Disposed())
 		wg.Done()
 	}).
 		Timeout(time.Millisecond * 250).
@@ -499,13 +500,17 @@ func TestFork(t *testing.T) {
 	s := FromIntChannel(ch).Fork()
 	a := []int{}
 	b := []int{}
-	s.SubscribeNext(func(n int) { a = append(a, n) })
+	sub := s.SubscribeNext(func(n int) { a = append(a, n) })
 	s.SubscribeNext(func(n int) { b = append(b, n) })
 	ch <- 1
 	ch <- 2
 	ch <- 3
+	runtime.Gosched()
+	sub.Dispose()
+	assert.True(t, sub.Disposed())
+	ch <- 4
 	close(ch)
 	s.Wait()
+	assert.Equal(t, []int{1, 2, 3, 4}, b)
 	assert.Equal(t, []int{1, 2, 3}, a)
-	assert.Equal(t, []int{1, 2, 3}, b)
 }
