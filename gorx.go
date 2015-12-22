@@ -2905,6 +2905,88 @@ func (s *BoolStream) FlatMapDuration(f func (bool) DurationObservable) *Duration
 
 
 
+type MappingBool2ByteSliceFunc func(next bool, err error, complete bool, observer ByteSliceObserver)
+type MappingBool2ByteSliceFuncFactory func (observer ByteSliceObserver) MappingBool2ByteSliceFunc
+
+type MappingBool2ByteSliceObservable struct {
+	parent  BoolObservable
+	mapper MappingBool2ByteSliceFuncFactory
+}
+
+func (f *MappingBool2ByteSliceObservable) Subscribe(observer ByteSliceObserver) Subscription {
+	mapper := f.mapper(observer)
+	return f.parent.Subscribe(BoolObserverFunc(func(next bool, err error, complete bool) {
+		mapper(next, err, complete, observer)
+	}))
+}
+
+func MapBool2ByteSliceObservable(parent BoolObservable, mapper MappingBool2ByteSliceFuncFactory) ByteSliceObservable {
+	return &MappingBool2ByteSliceObservable{
+		parent:  parent,
+		mapper: mapper,
+	}
+}
+
+func MapBool2ByteSliceObserveDirect(parent BoolObservable, mapper MappingBool2ByteSliceFunc) ByteSliceObservable {
+	return MapBool2ByteSliceObservable(parent, func(ByteSliceObserver) MappingBool2ByteSliceFunc {
+		return mapper
+	})
+}
+
+func MapBool2ByteSliceObserveNext(parent BoolObservable, mapper func(bool) []byte) ByteSliceObservable {
+	return MapBool2ByteSliceObservable(parent, func(ByteSliceObserver) MappingBool2ByteSliceFunc {
+			return func(next bool, err error, complete bool, observer ByteSliceObserver) {
+				var mapped []byte
+				if err == nil && !complete {
+					mapped = mapper(next)
+				}
+				PassthroughByteSlice(mapped, err, complete, observer)
+			}
+		},
+	)
+}
+
+type flatMapBool2ByteSlice struct {
+	parent BoolObservable
+	mapper func (bool) ByteSliceObservable
+}
+
+func (f *flatMapBool2ByteSlice) Subscribe(observer ByteSliceObserver) Subscription {
+	subscription := NewGenericSubscription()
+	wg := sync.WaitGroup{}
+	f.parent.Subscribe(BoolObserverFunc(func (next bool, err error, complete bool) {
+		switch {
+		case err != nil:
+			wg.Wait()
+			observer.Error(err)
+		case complete:
+			wg.Wait()
+			observer.Complete()
+		default:
+			wg.Add(1)
+			observable := f.mapper(next)
+			stream := (&ByteSliceStream{observable}).
+				DoOnComplete(func() { wg.Done() }).
+				DoOnError(func(error) { wg.Done() })
+			stream = &ByteSliceStream{ignoreCompletionFilter().ByteSlice(stream)}
+			stream.Subscribe(observer)
+		}
+	}))
+	return subscription
+}
+
+
+// MapByteSlice maps this stream to an ByteSliceStream via f.
+func (s *BoolStream) MapByteSlice(f func (bool) []byte) *ByteSliceStream {
+	return FromByteSliceObservable(MapBool2ByteSliceObserveNext(s, f))
+}
+
+func (s *BoolStream) FlatMapByteSlice(f func (bool) ByteSliceObservable) *ByteSliceStream {
+	return &ByteSliceStream{&flatMapBool2ByteSlice{s, f}}
+}
+
+
+
 
 
 type RuneObserver interface {
@@ -5222,6 +5304,88 @@ func (s *RuneStream) MapDuration(f func (rune) time.Duration) *DurationStream {
 
 func (s *RuneStream) FlatMapDuration(f func (rune) DurationObservable) *DurationStream {
 	return &DurationStream{&flatMapRune2Duration{s, f}}
+}
+
+
+
+type MappingRune2ByteSliceFunc func(next rune, err error, complete bool, observer ByteSliceObserver)
+type MappingRune2ByteSliceFuncFactory func (observer ByteSliceObserver) MappingRune2ByteSliceFunc
+
+type MappingRune2ByteSliceObservable struct {
+	parent  RuneObservable
+	mapper MappingRune2ByteSliceFuncFactory
+}
+
+func (f *MappingRune2ByteSliceObservable) Subscribe(observer ByteSliceObserver) Subscription {
+	mapper := f.mapper(observer)
+	return f.parent.Subscribe(RuneObserverFunc(func(next rune, err error, complete bool) {
+		mapper(next, err, complete, observer)
+	}))
+}
+
+func MapRune2ByteSliceObservable(parent RuneObservable, mapper MappingRune2ByteSliceFuncFactory) ByteSliceObservable {
+	return &MappingRune2ByteSliceObservable{
+		parent:  parent,
+		mapper: mapper,
+	}
+}
+
+func MapRune2ByteSliceObserveDirect(parent RuneObservable, mapper MappingRune2ByteSliceFunc) ByteSliceObservable {
+	return MapRune2ByteSliceObservable(parent, func(ByteSliceObserver) MappingRune2ByteSliceFunc {
+		return mapper
+	})
+}
+
+func MapRune2ByteSliceObserveNext(parent RuneObservable, mapper func(rune) []byte) ByteSliceObservable {
+	return MapRune2ByteSliceObservable(parent, func(ByteSliceObserver) MappingRune2ByteSliceFunc {
+			return func(next rune, err error, complete bool, observer ByteSliceObserver) {
+				var mapped []byte
+				if err == nil && !complete {
+					mapped = mapper(next)
+				}
+				PassthroughByteSlice(mapped, err, complete, observer)
+			}
+		},
+	)
+}
+
+type flatMapRune2ByteSlice struct {
+	parent RuneObservable
+	mapper func (rune) ByteSliceObservable
+}
+
+func (f *flatMapRune2ByteSlice) Subscribe(observer ByteSliceObserver) Subscription {
+	subscription := NewGenericSubscription()
+	wg := sync.WaitGroup{}
+	f.parent.Subscribe(RuneObserverFunc(func (next rune, err error, complete bool) {
+		switch {
+		case err != nil:
+			wg.Wait()
+			observer.Error(err)
+		case complete:
+			wg.Wait()
+			observer.Complete()
+		default:
+			wg.Add(1)
+			observable := f.mapper(next)
+			stream := (&ByteSliceStream{observable}).
+				DoOnComplete(func() { wg.Done() }).
+				DoOnError(func(error) { wg.Done() })
+			stream = &ByteSliceStream{ignoreCompletionFilter().ByteSlice(stream)}
+			stream.Subscribe(observer)
+		}
+	}))
+	return subscription
+}
+
+
+// MapByteSlice maps this stream to an ByteSliceStream via f.
+func (s *RuneStream) MapByteSlice(f func (rune) []byte) *ByteSliceStream {
+	return FromByteSliceObservable(MapRune2ByteSliceObserveNext(s, f))
+}
+
+func (s *RuneStream) FlatMapByteSlice(f func (rune) ByteSliceObservable) *ByteSliceStream {
+	return &ByteSliceStream{&flatMapRune2ByteSlice{s, f}}
 }
 
 
@@ -7636,6 +7800,88 @@ func (s *ByteStream) FlatMapDuration(f func (byte) DurationObservable) *Duration
 
 
 
+type MappingByte2ByteSliceFunc func(next byte, err error, complete bool, observer ByteSliceObserver)
+type MappingByte2ByteSliceFuncFactory func (observer ByteSliceObserver) MappingByte2ByteSliceFunc
+
+type MappingByte2ByteSliceObservable struct {
+	parent  ByteObservable
+	mapper MappingByte2ByteSliceFuncFactory
+}
+
+func (f *MappingByte2ByteSliceObservable) Subscribe(observer ByteSliceObserver) Subscription {
+	mapper := f.mapper(observer)
+	return f.parent.Subscribe(ByteObserverFunc(func(next byte, err error, complete bool) {
+		mapper(next, err, complete, observer)
+	}))
+}
+
+func MapByte2ByteSliceObservable(parent ByteObservable, mapper MappingByte2ByteSliceFuncFactory) ByteSliceObservable {
+	return &MappingByte2ByteSliceObservable{
+		parent:  parent,
+		mapper: mapper,
+	}
+}
+
+func MapByte2ByteSliceObserveDirect(parent ByteObservable, mapper MappingByte2ByteSliceFunc) ByteSliceObservable {
+	return MapByte2ByteSliceObservable(parent, func(ByteSliceObserver) MappingByte2ByteSliceFunc {
+		return mapper
+	})
+}
+
+func MapByte2ByteSliceObserveNext(parent ByteObservable, mapper func(byte) []byte) ByteSliceObservable {
+	return MapByte2ByteSliceObservable(parent, func(ByteSliceObserver) MappingByte2ByteSliceFunc {
+			return func(next byte, err error, complete bool, observer ByteSliceObserver) {
+				var mapped []byte
+				if err == nil && !complete {
+					mapped = mapper(next)
+				}
+				PassthroughByteSlice(mapped, err, complete, observer)
+			}
+		},
+	)
+}
+
+type flatMapByte2ByteSlice struct {
+	parent ByteObservable
+	mapper func (byte) ByteSliceObservable
+}
+
+func (f *flatMapByte2ByteSlice) Subscribe(observer ByteSliceObserver) Subscription {
+	subscription := NewGenericSubscription()
+	wg := sync.WaitGroup{}
+	f.parent.Subscribe(ByteObserverFunc(func (next byte, err error, complete bool) {
+		switch {
+		case err != nil:
+			wg.Wait()
+			observer.Error(err)
+		case complete:
+			wg.Wait()
+			observer.Complete()
+		default:
+			wg.Add(1)
+			observable := f.mapper(next)
+			stream := (&ByteSliceStream{observable}).
+				DoOnComplete(func() { wg.Done() }).
+				DoOnError(func(error) { wg.Done() })
+			stream = &ByteSliceStream{ignoreCompletionFilter().ByteSlice(stream)}
+			stream.Subscribe(observer)
+		}
+	}))
+	return subscription
+}
+
+
+// MapByteSlice maps this stream to an ByteSliceStream via f.
+func (s *ByteStream) MapByteSlice(f func (byte) []byte) *ByteSliceStream {
+	return FromByteSliceObservable(MapByte2ByteSliceObserveNext(s, f))
+}
+
+func (s *ByteStream) FlatMapByteSlice(f func (byte) ByteSliceObservable) *ByteSliceStream {
+	return &ByteSliceStream{&flatMapByte2ByteSlice{s, f}}
+}
+
+
+
 
 
 type StringObserver interface {
@@ -9953,6 +10199,88 @@ func (s *StringStream) MapDuration(f func (string) time.Duration) *DurationStrea
 
 func (s *StringStream) FlatMapDuration(f func (string) DurationObservable) *DurationStream {
 	return &DurationStream{&flatMapString2Duration{s, f}}
+}
+
+
+
+type MappingString2ByteSliceFunc func(next string, err error, complete bool, observer ByteSliceObserver)
+type MappingString2ByteSliceFuncFactory func (observer ByteSliceObserver) MappingString2ByteSliceFunc
+
+type MappingString2ByteSliceObservable struct {
+	parent  StringObservable
+	mapper MappingString2ByteSliceFuncFactory
+}
+
+func (f *MappingString2ByteSliceObservable) Subscribe(observer ByteSliceObserver) Subscription {
+	mapper := f.mapper(observer)
+	return f.parent.Subscribe(StringObserverFunc(func(next string, err error, complete bool) {
+		mapper(next, err, complete, observer)
+	}))
+}
+
+func MapString2ByteSliceObservable(parent StringObservable, mapper MappingString2ByteSliceFuncFactory) ByteSliceObservable {
+	return &MappingString2ByteSliceObservable{
+		parent:  parent,
+		mapper: mapper,
+	}
+}
+
+func MapString2ByteSliceObserveDirect(parent StringObservable, mapper MappingString2ByteSliceFunc) ByteSliceObservable {
+	return MapString2ByteSliceObservable(parent, func(ByteSliceObserver) MappingString2ByteSliceFunc {
+		return mapper
+	})
+}
+
+func MapString2ByteSliceObserveNext(parent StringObservable, mapper func(string) []byte) ByteSliceObservable {
+	return MapString2ByteSliceObservable(parent, func(ByteSliceObserver) MappingString2ByteSliceFunc {
+			return func(next string, err error, complete bool, observer ByteSliceObserver) {
+				var mapped []byte
+				if err == nil && !complete {
+					mapped = mapper(next)
+				}
+				PassthroughByteSlice(mapped, err, complete, observer)
+			}
+		},
+	)
+}
+
+type flatMapString2ByteSlice struct {
+	parent StringObservable
+	mapper func (string) ByteSliceObservable
+}
+
+func (f *flatMapString2ByteSlice) Subscribe(observer ByteSliceObserver) Subscription {
+	subscription := NewGenericSubscription()
+	wg := sync.WaitGroup{}
+	f.parent.Subscribe(StringObserverFunc(func (next string, err error, complete bool) {
+		switch {
+		case err != nil:
+			wg.Wait()
+			observer.Error(err)
+		case complete:
+			wg.Wait()
+			observer.Complete()
+		default:
+			wg.Add(1)
+			observable := f.mapper(next)
+			stream := (&ByteSliceStream{observable}).
+				DoOnComplete(func() { wg.Done() }).
+				DoOnError(func(error) { wg.Done() })
+			stream = &ByteSliceStream{ignoreCompletionFilter().ByteSlice(stream)}
+			stream.Subscribe(observer)
+		}
+	}))
+	return subscription
+}
+
+
+// MapByteSlice maps this stream to an ByteSliceStream via f.
+func (s *StringStream) MapByteSlice(f func (string) []byte) *ByteSliceStream {
+	return FromByteSliceObservable(MapString2ByteSliceObserveNext(s, f))
+}
+
+func (s *StringStream) FlatMapByteSlice(f func (string) ByteSliceObservable) *ByteSliceStream {
+	return &ByteSliceStream{&flatMapString2ByteSlice{s, f}}
 }
 
 
@@ -12367,6 +12695,88 @@ func (s *UintStream) FlatMapDuration(f func (uint) DurationObservable) *Duration
 
 
 
+type MappingUint2ByteSliceFunc func(next uint, err error, complete bool, observer ByteSliceObserver)
+type MappingUint2ByteSliceFuncFactory func (observer ByteSliceObserver) MappingUint2ByteSliceFunc
+
+type MappingUint2ByteSliceObservable struct {
+	parent  UintObservable
+	mapper MappingUint2ByteSliceFuncFactory
+}
+
+func (f *MappingUint2ByteSliceObservable) Subscribe(observer ByteSliceObserver) Subscription {
+	mapper := f.mapper(observer)
+	return f.parent.Subscribe(UintObserverFunc(func(next uint, err error, complete bool) {
+		mapper(next, err, complete, observer)
+	}))
+}
+
+func MapUint2ByteSliceObservable(parent UintObservable, mapper MappingUint2ByteSliceFuncFactory) ByteSliceObservable {
+	return &MappingUint2ByteSliceObservable{
+		parent:  parent,
+		mapper: mapper,
+	}
+}
+
+func MapUint2ByteSliceObserveDirect(parent UintObservable, mapper MappingUint2ByteSliceFunc) ByteSliceObservable {
+	return MapUint2ByteSliceObservable(parent, func(ByteSliceObserver) MappingUint2ByteSliceFunc {
+		return mapper
+	})
+}
+
+func MapUint2ByteSliceObserveNext(parent UintObservable, mapper func(uint) []byte) ByteSliceObservable {
+	return MapUint2ByteSliceObservable(parent, func(ByteSliceObserver) MappingUint2ByteSliceFunc {
+			return func(next uint, err error, complete bool, observer ByteSliceObserver) {
+				var mapped []byte
+				if err == nil && !complete {
+					mapped = mapper(next)
+				}
+				PassthroughByteSlice(mapped, err, complete, observer)
+			}
+		},
+	)
+}
+
+type flatMapUint2ByteSlice struct {
+	parent UintObservable
+	mapper func (uint) ByteSliceObservable
+}
+
+func (f *flatMapUint2ByteSlice) Subscribe(observer ByteSliceObserver) Subscription {
+	subscription := NewGenericSubscription()
+	wg := sync.WaitGroup{}
+	f.parent.Subscribe(UintObserverFunc(func (next uint, err error, complete bool) {
+		switch {
+		case err != nil:
+			wg.Wait()
+			observer.Error(err)
+		case complete:
+			wg.Wait()
+			observer.Complete()
+		default:
+			wg.Add(1)
+			observable := f.mapper(next)
+			stream := (&ByteSliceStream{observable}).
+				DoOnComplete(func() { wg.Done() }).
+				DoOnError(func(error) { wg.Done() })
+			stream = &ByteSliceStream{ignoreCompletionFilter().ByteSlice(stream)}
+			stream.Subscribe(observer)
+		}
+	}))
+	return subscription
+}
+
+
+// MapByteSlice maps this stream to an ByteSliceStream via f.
+func (s *UintStream) MapByteSlice(f func (uint) []byte) *ByteSliceStream {
+	return FromByteSliceObservable(MapUint2ByteSliceObserveNext(s, f))
+}
+
+func (s *UintStream) FlatMapByteSlice(f func (uint) ByteSliceObservable) *ByteSliceStream {
+	return &ByteSliceStream{&flatMapUint2ByteSlice{s, f}}
+}
+
+
+
 
 
 type IntObserver interface {
@@ -14773,6 +15183,88 @@ func (s *IntStream) MapDuration(f func (int) time.Duration) *DurationStream {
 
 func (s *IntStream) FlatMapDuration(f func (int) DurationObservable) *DurationStream {
 	return &DurationStream{&flatMapInt2Duration{s, f}}
+}
+
+
+
+type MappingInt2ByteSliceFunc func(next int, err error, complete bool, observer ByteSliceObserver)
+type MappingInt2ByteSliceFuncFactory func (observer ByteSliceObserver) MappingInt2ByteSliceFunc
+
+type MappingInt2ByteSliceObservable struct {
+	parent  IntObservable
+	mapper MappingInt2ByteSliceFuncFactory
+}
+
+func (f *MappingInt2ByteSliceObservable) Subscribe(observer ByteSliceObserver) Subscription {
+	mapper := f.mapper(observer)
+	return f.parent.Subscribe(IntObserverFunc(func(next int, err error, complete bool) {
+		mapper(next, err, complete, observer)
+	}))
+}
+
+func MapInt2ByteSliceObservable(parent IntObservable, mapper MappingInt2ByteSliceFuncFactory) ByteSliceObservable {
+	return &MappingInt2ByteSliceObservable{
+		parent:  parent,
+		mapper: mapper,
+	}
+}
+
+func MapInt2ByteSliceObserveDirect(parent IntObservable, mapper MappingInt2ByteSliceFunc) ByteSliceObservable {
+	return MapInt2ByteSliceObservable(parent, func(ByteSliceObserver) MappingInt2ByteSliceFunc {
+		return mapper
+	})
+}
+
+func MapInt2ByteSliceObserveNext(parent IntObservable, mapper func(int) []byte) ByteSliceObservable {
+	return MapInt2ByteSliceObservable(parent, func(ByteSliceObserver) MappingInt2ByteSliceFunc {
+			return func(next int, err error, complete bool, observer ByteSliceObserver) {
+				var mapped []byte
+				if err == nil && !complete {
+					mapped = mapper(next)
+				}
+				PassthroughByteSlice(mapped, err, complete, observer)
+			}
+		},
+	)
+}
+
+type flatMapInt2ByteSlice struct {
+	parent IntObservable
+	mapper func (int) ByteSliceObservable
+}
+
+func (f *flatMapInt2ByteSlice) Subscribe(observer ByteSliceObserver) Subscription {
+	subscription := NewGenericSubscription()
+	wg := sync.WaitGroup{}
+	f.parent.Subscribe(IntObserverFunc(func (next int, err error, complete bool) {
+		switch {
+		case err != nil:
+			wg.Wait()
+			observer.Error(err)
+		case complete:
+			wg.Wait()
+			observer.Complete()
+		default:
+			wg.Add(1)
+			observable := f.mapper(next)
+			stream := (&ByteSliceStream{observable}).
+				DoOnComplete(func() { wg.Done() }).
+				DoOnError(func(error) { wg.Done() })
+			stream = &ByteSliceStream{ignoreCompletionFilter().ByteSlice(stream)}
+			stream.Subscribe(observer)
+		}
+	}))
+	return subscription
+}
+
+
+// MapByteSlice maps this stream to an ByteSliceStream via f.
+func (s *IntStream) MapByteSlice(f func (int) []byte) *ByteSliceStream {
+	return FromByteSliceObservable(MapInt2ByteSliceObserveNext(s, f))
+}
+
+func (s *IntStream) FlatMapByteSlice(f func (int) ByteSliceObservable) *ByteSliceStream {
+	return &ByteSliceStream{&flatMapInt2ByteSlice{s, f}}
 }
 
 
@@ -17187,6 +17679,88 @@ func (s *Uint8Stream) FlatMapDuration(f func (uint8) DurationObservable) *Durati
 
 
 
+type MappingUint82ByteSliceFunc func(next uint8, err error, complete bool, observer ByteSliceObserver)
+type MappingUint82ByteSliceFuncFactory func (observer ByteSliceObserver) MappingUint82ByteSliceFunc
+
+type MappingUint82ByteSliceObservable struct {
+	parent  Uint8Observable
+	mapper MappingUint82ByteSliceFuncFactory
+}
+
+func (f *MappingUint82ByteSliceObservable) Subscribe(observer ByteSliceObserver) Subscription {
+	mapper := f.mapper(observer)
+	return f.parent.Subscribe(Uint8ObserverFunc(func(next uint8, err error, complete bool) {
+		mapper(next, err, complete, observer)
+	}))
+}
+
+func MapUint82ByteSliceObservable(parent Uint8Observable, mapper MappingUint82ByteSliceFuncFactory) ByteSliceObservable {
+	return &MappingUint82ByteSliceObservable{
+		parent:  parent,
+		mapper: mapper,
+	}
+}
+
+func MapUint82ByteSliceObserveDirect(parent Uint8Observable, mapper MappingUint82ByteSliceFunc) ByteSliceObservable {
+	return MapUint82ByteSliceObservable(parent, func(ByteSliceObserver) MappingUint82ByteSliceFunc {
+		return mapper
+	})
+}
+
+func MapUint82ByteSliceObserveNext(parent Uint8Observable, mapper func(uint8) []byte) ByteSliceObservable {
+	return MapUint82ByteSliceObservable(parent, func(ByteSliceObserver) MappingUint82ByteSliceFunc {
+			return func(next uint8, err error, complete bool, observer ByteSliceObserver) {
+				var mapped []byte
+				if err == nil && !complete {
+					mapped = mapper(next)
+				}
+				PassthroughByteSlice(mapped, err, complete, observer)
+			}
+		},
+	)
+}
+
+type flatMapUint82ByteSlice struct {
+	parent Uint8Observable
+	mapper func (uint8) ByteSliceObservable
+}
+
+func (f *flatMapUint82ByteSlice) Subscribe(observer ByteSliceObserver) Subscription {
+	subscription := NewGenericSubscription()
+	wg := sync.WaitGroup{}
+	f.parent.Subscribe(Uint8ObserverFunc(func (next uint8, err error, complete bool) {
+		switch {
+		case err != nil:
+			wg.Wait()
+			observer.Error(err)
+		case complete:
+			wg.Wait()
+			observer.Complete()
+		default:
+			wg.Add(1)
+			observable := f.mapper(next)
+			stream := (&ByteSliceStream{observable}).
+				DoOnComplete(func() { wg.Done() }).
+				DoOnError(func(error) { wg.Done() })
+			stream = &ByteSliceStream{ignoreCompletionFilter().ByteSlice(stream)}
+			stream.Subscribe(observer)
+		}
+	}))
+	return subscription
+}
+
+
+// MapByteSlice maps this stream to an ByteSliceStream via f.
+func (s *Uint8Stream) MapByteSlice(f func (uint8) []byte) *ByteSliceStream {
+	return FromByteSliceObservable(MapUint82ByteSliceObserveNext(s, f))
+}
+
+func (s *Uint8Stream) FlatMapByteSlice(f func (uint8) ByteSliceObservable) *ByteSliceStream {
+	return &ByteSliceStream{&flatMapUint82ByteSlice{s, f}}
+}
+
+
+
 
 
 type Int8Observer interface {
@@ -19593,6 +20167,88 @@ func (s *Int8Stream) MapDuration(f func (int8) time.Duration) *DurationStream {
 
 func (s *Int8Stream) FlatMapDuration(f func (int8) DurationObservable) *DurationStream {
 	return &DurationStream{&flatMapInt82Duration{s, f}}
+}
+
+
+
+type MappingInt82ByteSliceFunc func(next int8, err error, complete bool, observer ByteSliceObserver)
+type MappingInt82ByteSliceFuncFactory func (observer ByteSliceObserver) MappingInt82ByteSliceFunc
+
+type MappingInt82ByteSliceObservable struct {
+	parent  Int8Observable
+	mapper MappingInt82ByteSliceFuncFactory
+}
+
+func (f *MappingInt82ByteSliceObservable) Subscribe(observer ByteSliceObserver) Subscription {
+	mapper := f.mapper(observer)
+	return f.parent.Subscribe(Int8ObserverFunc(func(next int8, err error, complete bool) {
+		mapper(next, err, complete, observer)
+	}))
+}
+
+func MapInt82ByteSliceObservable(parent Int8Observable, mapper MappingInt82ByteSliceFuncFactory) ByteSliceObservable {
+	return &MappingInt82ByteSliceObservable{
+		parent:  parent,
+		mapper: mapper,
+	}
+}
+
+func MapInt82ByteSliceObserveDirect(parent Int8Observable, mapper MappingInt82ByteSliceFunc) ByteSliceObservable {
+	return MapInt82ByteSliceObservable(parent, func(ByteSliceObserver) MappingInt82ByteSliceFunc {
+		return mapper
+	})
+}
+
+func MapInt82ByteSliceObserveNext(parent Int8Observable, mapper func(int8) []byte) ByteSliceObservable {
+	return MapInt82ByteSliceObservable(parent, func(ByteSliceObserver) MappingInt82ByteSliceFunc {
+			return func(next int8, err error, complete bool, observer ByteSliceObserver) {
+				var mapped []byte
+				if err == nil && !complete {
+					mapped = mapper(next)
+				}
+				PassthroughByteSlice(mapped, err, complete, observer)
+			}
+		},
+	)
+}
+
+type flatMapInt82ByteSlice struct {
+	parent Int8Observable
+	mapper func (int8) ByteSliceObservable
+}
+
+func (f *flatMapInt82ByteSlice) Subscribe(observer ByteSliceObserver) Subscription {
+	subscription := NewGenericSubscription()
+	wg := sync.WaitGroup{}
+	f.parent.Subscribe(Int8ObserverFunc(func (next int8, err error, complete bool) {
+		switch {
+		case err != nil:
+			wg.Wait()
+			observer.Error(err)
+		case complete:
+			wg.Wait()
+			observer.Complete()
+		default:
+			wg.Add(1)
+			observable := f.mapper(next)
+			stream := (&ByteSliceStream{observable}).
+				DoOnComplete(func() { wg.Done() }).
+				DoOnError(func(error) { wg.Done() })
+			stream = &ByteSliceStream{ignoreCompletionFilter().ByteSlice(stream)}
+			stream.Subscribe(observer)
+		}
+	}))
+	return subscription
+}
+
+
+// MapByteSlice maps this stream to an ByteSliceStream via f.
+func (s *Int8Stream) MapByteSlice(f func (int8) []byte) *ByteSliceStream {
+	return FromByteSliceObservable(MapInt82ByteSliceObserveNext(s, f))
+}
+
+func (s *Int8Stream) FlatMapByteSlice(f func (int8) ByteSliceObservable) *ByteSliceStream {
+	return &ByteSliceStream{&flatMapInt82ByteSlice{s, f}}
 }
 
 
@@ -22007,6 +22663,88 @@ func (s *Uint16Stream) FlatMapDuration(f func (uint16) DurationObservable) *Dura
 
 
 
+type MappingUint162ByteSliceFunc func(next uint16, err error, complete bool, observer ByteSliceObserver)
+type MappingUint162ByteSliceFuncFactory func (observer ByteSliceObserver) MappingUint162ByteSliceFunc
+
+type MappingUint162ByteSliceObservable struct {
+	parent  Uint16Observable
+	mapper MappingUint162ByteSliceFuncFactory
+}
+
+func (f *MappingUint162ByteSliceObservable) Subscribe(observer ByteSliceObserver) Subscription {
+	mapper := f.mapper(observer)
+	return f.parent.Subscribe(Uint16ObserverFunc(func(next uint16, err error, complete bool) {
+		mapper(next, err, complete, observer)
+	}))
+}
+
+func MapUint162ByteSliceObservable(parent Uint16Observable, mapper MappingUint162ByteSliceFuncFactory) ByteSliceObservable {
+	return &MappingUint162ByteSliceObservable{
+		parent:  parent,
+		mapper: mapper,
+	}
+}
+
+func MapUint162ByteSliceObserveDirect(parent Uint16Observable, mapper MappingUint162ByteSliceFunc) ByteSliceObservable {
+	return MapUint162ByteSliceObservable(parent, func(ByteSliceObserver) MappingUint162ByteSliceFunc {
+		return mapper
+	})
+}
+
+func MapUint162ByteSliceObserveNext(parent Uint16Observable, mapper func(uint16) []byte) ByteSliceObservable {
+	return MapUint162ByteSliceObservable(parent, func(ByteSliceObserver) MappingUint162ByteSliceFunc {
+			return func(next uint16, err error, complete bool, observer ByteSliceObserver) {
+				var mapped []byte
+				if err == nil && !complete {
+					mapped = mapper(next)
+				}
+				PassthroughByteSlice(mapped, err, complete, observer)
+			}
+		},
+	)
+}
+
+type flatMapUint162ByteSlice struct {
+	parent Uint16Observable
+	mapper func (uint16) ByteSliceObservable
+}
+
+func (f *flatMapUint162ByteSlice) Subscribe(observer ByteSliceObserver) Subscription {
+	subscription := NewGenericSubscription()
+	wg := sync.WaitGroup{}
+	f.parent.Subscribe(Uint16ObserverFunc(func (next uint16, err error, complete bool) {
+		switch {
+		case err != nil:
+			wg.Wait()
+			observer.Error(err)
+		case complete:
+			wg.Wait()
+			observer.Complete()
+		default:
+			wg.Add(1)
+			observable := f.mapper(next)
+			stream := (&ByteSliceStream{observable}).
+				DoOnComplete(func() { wg.Done() }).
+				DoOnError(func(error) { wg.Done() })
+			stream = &ByteSliceStream{ignoreCompletionFilter().ByteSlice(stream)}
+			stream.Subscribe(observer)
+		}
+	}))
+	return subscription
+}
+
+
+// MapByteSlice maps this stream to an ByteSliceStream via f.
+func (s *Uint16Stream) MapByteSlice(f func (uint16) []byte) *ByteSliceStream {
+	return FromByteSliceObservable(MapUint162ByteSliceObserveNext(s, f))
+}
+
+func (s *Uint16Stream) FlatMapByteSlice(f func (uint16) ByteSliceObservable) *ByteSliceStream {
+	return &ByteSliceStream{&flatMapUint162ByteSlice{s, f}}
+}
+
+
+
 
 
 type Int16Observer interface {
@@ -24413,6 +25151,88 @@ func (s *Int16Stream) MapDuration(f func (int16) time.Duration) *DurationStream 
 
 func (s *Int16Stream) FlatMapDuration(f func (int16) DurationObservable) *DurationStream {
 	return &DurationStream{&flatMapInt162Duration{s, f}}
+}
+
+
+
+type MappingInt162ByteSliceFunc func(next int16, err error, complete bool, observer ByteSliceObserver)
+type MappingInt162ByteSliceFuncFactory func (observer ByteSliceObserver) MappingInt162ByteSliceFunc
+
+type MappingInt162ByteSliceObservable struct {
+	parent  Int16Observable
+	mapper MappingInt162ByteSliceFuncFactory
+}
+
+func (f *MappingInt162ByteSliceObservable) Subscribe(observer ByteSliceObserver) Subscription {
+	mapper := f.mapper(observer)
+	return f.parent.Subscribe(Int16ObserverFunc(func(next int16, err error, complete bool) {
+		mapper(next, err, complete, observer)
+	}))
+}
+
+func MapInt162ByteSliceObservable(parent Int16Observable, mapper MappingInt162ByteSliceFuncFactory) ByteSliceObservable {
+	return &MappingInt162ByteSliceObservable{
+		parent:  parent,
+		mapper: mapper,
+	}
+}
+
+func MapInt162ByteSliceObserveDirect(parent Int16Observable, mapper MappingInt162ByteSliceFunc) ByteSliceObservable {
+	return MapInt162ByteSliceObservable(parent, func(ByteSliceObserver) MappingInt162ByteSliceFunc {
+		return mapper
+	})
+}
+
+func MapInt162ByteSliceObserveNext(parent Int16Observable, mapper func(int16) []byte) ByteSliceObservable {
+	return MapInt162ByteSliceObservable(parent, func(ByteSliceObserver) MappingInt162ByteSliceFunc {
+			return func(next int16, err error, complete bool, observer ByteSliceObserver) {
+				var mapped []byte
+				if err == nil && !complete {
+					mapped = mapper(next)
+				}
+				PassthroughByteSlice(mapped, err, complete, observer)
+			}
+		},
+	)
+}
+
+type flatMapInt162ByteSlice struct {
+	parent Int16Observable
+	mapper func (int16) ByteSliceObservable
+}
+
+func (f *flatMapInt162ByteSlice) Subscribe(observer ByteSliceObserver) Subscription {
+	subscription := NewGenericSubscription()
+	wg := sync.WaitGroup{}
+	f.parent.Subscribe(Int16ObserverFunc(func (next int16, err error, complete bool) {
+		switch {
+		case err != nil:
+			wg.Wait()
+			observer.Error(err)
+		case complete:
+			wg.Wait()
+			observer.Complete()
+		default:
+			wg.Add(1)
+			observable := f.mapper(next)
+			stream := (&ByteSliceStream{observable}).
+				DoOnComplete(func() { wg.Done() }).
+				DoOnError(func(error) { wg.Done() })
+			stream = &ByteSliceStream{ignoreCompletionFilter().ByteSlice(stream)}
+			stream.Subscribe(observer)
+		}
+	}))
+	return subscription
+}
+
+
+// MapByteSlice maps this stream to an ByteSliceStream via f.
+func (s *Int16Stream) MapByteSlice(f func (int16) []byte) *ByteSliceStream {
+	return FromByteSliceObservable(MapInt162ByteSliceObserveNext(s, f))
+}
+
+func (s *Int16Stream) FlatMapByteSlice(f func (int16) ByteSliceObservable) *ByteSliceStream {
+	return &ByteSliceStream{&flatMapInt162ByteSlice{s, f}}
 }
 
 
@@ -26827,6 +27647,88 @@ func (s *Uint32Stream) FlatMapDuration(f func (uint32) DurationObservable) *Dura
 
 
 
+type MappingUint322ByteSliceFunc func(next uint32, err error, complete bool, observer ByteSliceObserver)
+type MappingUint322ByteSliceFuncFactory func (observer ByteSliceObserver) MappingUint322ByteSliceFunc
+
+type MappingUint322ByteSliceObservable struct {
+	parent  Uint32Observable
+	mapper MappingUint322ByteSliceFuncFactory
+}
+
+func (f *MappingUint322ByteSliceObservable) Subscribe(observer ByteSliceObserver) Subscription {
+	mapper := f.mapper(observer)
+	return f.parent.Subscribe(Uint32ObserverFunc(func(next uint32, err error, complete bool) {
+		mapper(next, err, complete, observer)
+	}))
+}
+
+func MapUint322ByteSliceObservable(parent Uint32Observable, mapper MappingUint322ByteSliceFuncFactory) ByteSliceObservable {
+	return &MappingUint322ByteSliceObservable{
+		parent:  parent,
+		mapper: mapper,
+	}
+}
+
+func MapUint322ByteSliceObserveDirect(parent Uint32Observable, mapper MappingUint322ByteSliceFunc) ByteSliceObservable {
+	return MapUint322ByteSliceObservable(parent, func(ByteSliceObserver) MappingUint322ByteSliceFunc {
+		return mapper
+	})
+}
+
+func MapUint322ByteSliceObserveNext(parent Uint32Observable, mapper func(uint32) []byte) ByteSliceObservable {
+	return MapUint322ByteSliceObservable(parent, func(ByteSliceObserver) MappingUint322ByteSliceFunc {
+			return func(next uint32, err error, complete bool, observer ByteSliceObserver) {
+				var mapped []byte
+				if err == nil && !complete {
+					mapped = mapper(next)
+				}
+				PassthroughByteSlice(mapped, err, complete, observer)
+			}
+		},
+	)
+}
+
+type flatMapUint322ByteSlice struct {
+	parent Uint32Observable
+	mapper func (uint32) ByteSliceObservable
+}
+
+func (f *flatMapUint322ByteSlice) Subscribe(observer ByteSliceObserver) Subscription {
+	subscription := NewGenericSubscription()
+	wg := sync.WaitGroup{}
+	f.parent.Subscribe(Uint32ObserverFunc(func (next uint32, err error, complete bool) {
+		switch {
+		case err != nil:
+			wg.Wait()
+			observer.Error(err)
+		case complete:
+			wg.Wait()
+			observer.Complete()
+		default:
+			wg.Add(1)
+			observable := f.mapper(next)
+			stream := (&ByteSliceStream{observable}).
+				DoOnComplete(func() { wg.Done() }).
+				DoOnError(func(error) { wg.Done() })
+			stream = &ByteSliceStream{ignoreCompletionFilter().ByteSlice(stream)}
+			stream.Subscribe(observer)
+		}
+	}))
+	return subscription
+}
+
+
+// MapByteSlice maps this stream to an ByteSliceStream via f.
+func (s *Uint32Stream) MapByteSlice(f func (uint32) []byte) *ByteSliceStream {
+	return FromByteSliceObservable(MapUint322ByteSliceObserveNext(s, f))
+}
+
+func (s *Uint32Stream) FlatMapByteSlice(f func (uint32) ByteSliceObservable) *ByteSliceStream {
+	return &ByteSliceStream{&flatMapUint322ByteSlice{s, f}}
+}
+
+
+
 
 
 type Int32Observer interface {
@@ -29233,6 +30135,88 @@ func (s *Int32Stream) MapDuration(f func (int32) time.Duration) *DurationStream 
 
 func (s *Int32Stream) FlatMapDuration(f func (int32) DurationObservable) *DurationStream {
 	return &DurationStream{&flatMapInt322Duration{s, f}}
+}
+
+
+
+type MappingInt322ByteSliceFunc func(next int32, err error, complete bool, observer ByteSliceObserver)
+type MappingInt322ByteSliceFuncFactory func (observer ByteSliceObserver) MappingInt322ByteSliceFunc
+
+type MappingInt322ByteSliceObservable struct {
+	parent  Int32Observable
+	mapper MappingInt322ByteSliceFuncFactory
+}
+
+func (f *MappingInt322ByteSliceObservable) Subscribe(observer ByteSliceObserver) Subscription {
+	mapper := f.mapper(observer)
+	return f.parent.Subscribe(Int32ObserverFunc(func(next int32, err error, complete bool) {
+		mapper(next, err, complete, observer)
+	}))
+}
+
+func MapInt322ByteSliceObservable(parent Int32Observable, mapper MappingInt322ByteSliceFuncFactory) ByteSliceObservable {
+	return &MappingInt322ByteSliceObservable{
+		parent:  parent,
+		mapper: mapper,
+	}
+}
+
+func MapInt322ByteSliceObserveDirect(parent Int32Observable, mapper MappingInt322ByteSliceFunc) ByteSliceObservable {
+	return MapInt322ByteSliceObservable(parent, func(ByteSliceObserver) MappingInt322ByteSliceFunc {
+		return mapper
+	})
+}
+
+func MapInt322ByteSliceObserveNext(parent Int32Observable, mapper func(int32) []byte) ByteSliceObservable {
+	return MapInt322ByteSliceObservable(parent, func(ByteSliceObserver) MappingInt322ByteSliceFunc {
+			return func(next int32, err error, complete bool, observer ByteSliceObserver) {
+				var mapped []byte
+				if err == nil && !complete {
+					mapped = mapper(next)
+				}
+				PassthroughByteSlice(mapped, err, complete, observer)
+			}
+		},
+	)
+}
+
+type flatMapInt322ByteSlice struct {
+	parent Int32Observable
+	mapper func (int32) ByteSliceObservable
+}
+
+func (f *flatMapInt322ByteSlice) Subscribe(observer ByteSliceObserver) Subscription {
+	subscription := NewGenericSubscription()
+	wg := sync.WaitGroup{}
+	f.parent.Subscribe(Int32ObserverFunc(func (next int32, err error, complete bool) {
+		switch {
+		case err != nil:
+			wg.Wait()
+			observer.Error(err)
+		case complete:
+			wg.Wait()
+			observer.Complete()
+		default:
+			wg.Add(1)
+			observable := f.mapper(next)
+			stream := (&ByteSliceStream{observable}).
+				DoOnComplete(func() { wg.Done() }).
+				DoOnError(func(error) { wg.Done() })
+			stream = &ByteSliceStream{ignoreCompletionFilter().ByteSlice(stream)}
+			stream.Subscribe(observer)
+		}
+	}))
+	return subscription
+}
+
+
+// MapByteSlice maps this stream to an ByteSliceStream via f.
+func (s *Int32Stream) MapByteSlice(f func (int32) []byte) *ByteSliceStream {
+	return FromByteSliceObservable(MapInt322ByteSliceObserveNext(s, f))
+}
+
+func (s *Int32Stream) FlatMapByteSlice(f func (int32) ByteSliceObservable) *ByteSliceStream {
+	return &ByteSliceStream{&flatMapInt322ByteSlice{s, f}}
 }
 
 
@@ -31647,6 +32631,88 @@ func (s *Uint64Stream) FlatMapDuration(f func (uint64) DurationObservable) *Dura
 
 
 
+type MappingUint642ByteSliceFunc func(next uint64, err error, complete bool, observer ByteSliceObserver)
+type MappingUint642ByteSliceFuncFactory func (observer ByteSliceObserver) MappingUint642ByteSliceFunc
+
+type MappingUint642ByteSliceObservable struct {
+	parent  Uint64Observable
+	mapper MappingUint642ByteSliceFuncFactory
+}
+
+func (f *MappingUint642ByteSliceObservable) Subscribe(observer ByteSliceObserver) Subscription {
+	mapper := f.mapper(observer)
+	return f.parent.Subscribe(Uint64ObserverFunc(func(next uint64, err error, complete bool) {
+		mapper(next, err, complete, observer)
+	}))
+}
+
+func MapUint642ByteSliceObservable(parent Uint64Observable, mapper MappingUint642ByteSliceFuncFactory) ByteSliceObservable {
+	return &MappingUint642ByteSliceObservable{
+		parent:  parent,
+		mapper: mapper,
+	}
+}
+
+func MapUint642ByteSliceObserveDirect(parent Uint64Observable, mapper MappingUint642ByteSliceFunc) ByteSliceObservable {
+	return MapUint642ByteSliceObservable(parent, func(ByteSliceObserver) MappingUint642ByteSliceFunc {
+		return mapper
+	})
+}
+
+func MapUint642ByteSliceObserveNext(parent Uint64Observable, mapper func(uint64) []byte) ByteSliceObservable {
+	return MapUint642ByteSliceObservable(parent, func(ByteSliceObserver) MappingUint642ByteSliceFunc {
+			return func(next uint64, err error, complete bool, observer ByteSliceObserver) {
+				var mapped []byte
+				if err == nil && !complete {
+					mapped = mapper(next)
+				}
+				PassthroughByteSlice(mapped, err, complete, observer)
+			}
+		},
+	)
+}
+
+type flatMapUint642ByteSlice struct {
+	parent Uint64Observable
+	mapper func (uint64) ByteSliceObservable
+}
+
+func (f *flatMapUint642ByteSlice) Subscribe(observer ByteSliceObserver) Subscription {
+	subscription := NewGenericSubscription()
+	wg := sync.WaitGroup{}
+	f.parent.Subscribe(Uint64ObserverFunc(func (next uint64, err error, complete bool) {
+		switch {
+		case err != nil:
+			wg.Wait()
+			observer.Error(err)
+		case complete:
+			wg.Wait()
+			observer.Complete()
+		default:
+			wg.Add(1)
+			observable := f.mapper(next)
+			stream := (&ByteSliceStream{observable}).
+				DoOnComplete(func() { wg.Done() }).
+				DoOnError(func(error) { wg.Done() })
+			stream = &ByteSliceStream{ignoreCompletionFilter().ByteSlice(stream)}
+			stream.Subscribe(observer)
+		}
+	}))
+	return subscription
+}
+
+
+// MapByteSlice maps this stream to an ByteSliceStream via f.
+func (s *Uint64Stream) MapByteSlice(f func (uint64) []byte) *ByteSliceStream {
+	return FromByteSliceObservable(MapUint642ByteSliceObserveNext(s, f))
+}
+
+func (s *Uint64Stream) FlatMapByteSlice(f func (uint64) ByteSliceObservable) *ByteSliceStream {
+	return &ByteSliceStream{&flatMapUint642ByteSlice{s, f}}
+}
+
+
+
 
 
 type Int64Observer interface {
@@ -34053,6 +35119,88 @@ func (s *Int64Stream) MapDuration(f func (int64) time.Duration) *DurationStream 
 
 func (s *Int64Stream) FlatMapDuration(f func (int64) DurationObservable) *DurationStream {
 	return &DurationStream{&flatMapInt642Duration{s, f}}
+}
+
+
+
+type MappingInt642ByteSliceFunc func(next int64, err error, complete bool, observer ByteSliceObserver)
+type MappingInt642ByteSliceFuncFactory func (observer ByteSliceObserver) MappingInt642ByteSliceFunc
+
+type MappingInt642ByteSliceObservable struct {
+	parent  Int64Observable
+	mapper MappingInt642ByteSliceFuncFactory
+}
+
+func (f *MappingInt642ByteSliceObservable) Subscribe(observer ByteSliceObserver) Subscription {
+	mapper := f.mapper(observer)
+	return f.parent.Subscribe(Int64ObserverFunc(func(next int64, err error, complete bool) {
+		mapper(next, err, complete, observer)
+	}))
+}
+
+func MapInt642ByteSliceObservable(parent Int64Observable, mapper MappingInt642ByteSliceFuncFactory) ByteSliceObservable {
+	return &MappingInt642ByteSliceObservable{
+		parent:  parent,
+		mapper: mapper,
+	}
+}
+
+func MapInt642ByteSliceObserveDirect(parent Int64Observable, mapper MappingInt642ByteSliceFunc) ByteSliceObservable {
+	return MapInt642ByteSliceObservable(parent, func(ByteSliceObserver) MappingInt642ByteSliceFunc {
+		return mapper
+	})
+}
+
+func MapInt642ByteSliceObserveNext(parent Int64Observable, mapper func(int64) []byte) ByteSliceObservable {
+	return MapInt642ByteSliceObservable(parent, func(ByteSliceObserver) MappingInt642ByteSliceFunc {
+			return func(next int64, err error, complete bool, observer ByteSliceObserver) {
+				var mapped []byte
+				if err == nil && !complete {
+					mapped = mapper(next)
+				}
+				PassthroughByteSlice(mapped, err, complete, observer)
+			}
+		},
+	)
+}
+
+type flatMapInt642ByteSlice struct {
+	parent Int64Observable
+	mapper func (int64) ByteSliceObservable
+}
+
+func (f *flatMapInt642ByteSlice) Subscribe(observer ByteSliceObserver) Subscription {
+	subscription := NewGenericSubscription()
+	wg := sync.WaitGroup{}
+	f.parent.Subscribe(Int64ObserverFunc(func (next int64, err error, complete bool) {
+		switch {
+		case err != nil:
+			wg.Wait()
+			observer.Error(err)
+		case complete:
+			wg.Wait()
+			observer.Complete()
+		default:
+			wg.Add(1)
+			observable := f.mapper(next)
+			stream := (&ByteSliceStream{observable}).
+				DoOnComplete(func() { wg.Done() }).
+				DoOnError(func(error) { wg.Done() })
+			stream = &ByteSliceStream{ignoreCompletionFilter().ByteSlice(stream)}
+			stream.Subscribe(observer)
+		}
+	}))
+	return subscription
+}
+
+
+// MapByteSlice maps this stream to an ByteSliceStream via f.
+func (s *Int64Stream) MapByteSlice(f func (int64) []byte) *ByteSliceStream {
+	return FromByteSliceObservable(MapInt642ByteSliceObserveNext(s, f))
+}
+
+func (s *Int64Stream) FlatMapByteSlice(f func (int64) ByteSliceObservable) *ByteSliceStream {
+	return &ByteSliceStream{&flatMapInt642ByteSlice{s, f}}
 }
 
 
@@ -36467,6 +37615,88 @@ func (s *Float32Stream) FlatMapDuration(f func (float32) DurationObservable) *Du
 
 
 
+type MappingFloat322ByteSliceFunc func(next float32, err error, complete bool, observer ByteSliceObserver)
+type MappingFloat322ByteSliceFuncFactory func (observer ByteSliceObserver) MappingFloat322ByteSliceFunc
+
+type MappingFloat322ByteSliceObservable struct {
+	parent  Float32Observable
+	mapper MappingFloat322ByteSliceFuncFactory
+}
+
+func (f *MappingFloat322ByteSliceObservable) Subscribe(observer ByteSliceObserver) Subscription {
+	mapper := f.mapper(observer)
+	return f.parent.Subscribe(Float32ObserverFunc(func(next float32, err error, complete bool) {
+		mapper(next, err, complete, observer)
+	}))
+}
+
+func MapFloat322ByteSliceObservable(parent Float32Observable, mapper MappingFloat322ByteSliceFuncFactory) ByteSliceObservable {
+	return &MappingFloat322ByteSliceObservable{
+		parent:  parent,
+		mapper: mapper,
+	}
+}
+
+func MapFloat322ByteSliceObserveDirect(parent Float32Observable, mapper MappingFloat322ByteSliceFunc) ByteSliceObservable {
+	return MapFloat322ByteSliceObservable(parent, func(ByteSliceObserver) MappingFloat322ByteSliceFunc {
+		return mapper
+	})
+}
+
+func MapFloat322ByteSliceObserveNext(parent Float32Observable, mapper func(float32) []byte) ByteSliceObservable {
+	return MapFloat322ByteSliceObservable(parent, func(ByteSliceObserver) MappingFloat322ByteSliceFunc {
+			return func(next float32, err error, complete bool, observer ByteSliceObserver) {
+				var mapped []byte
+				if err == nil && !complete {
+					mapped = mapper(next)
+				}
+				PassthroughByteSlice(mapped, err, complete, observer)
+			}
+		},
+	)
+}
+
+type flatMapFloat322ByteSlice struct {
+	parent Float32Observable
+	mapper func (float32) ByteSliceObservable
+}
+
+func (f *flatMapFloat322ByteSlice) Subscribe(observer ByteSliceObserver) Subscription {
+	subscription := NewGenericSubscription()
+	wg := sync.WaitGroup{}
+	f.parent.Subscribe(Float32ObserverFunc(func (next float32, err error, complete bool) {
+		switch {
+		case err != nil:
+			wg.Wait()
+			observer.Error(err)
+		case complete:
+			wg.Wait()
+			observer.Complete()
+		default:
+			wg.Add(1)
+			observable := f.mapper(next)
+			stream := (&ByteSliceStream{observable}).
+				DoOnComplete(func() { wg.Done() }).
+				DoOnError(func(error) { wg.Done() })
+			stream = &ByteSliceStream{ignoreCompletionFilter().ByteSlice(stream)}
+			stream.Subscribe(observer)
+		}
+	}))
+	return subscription
+}
+
+
+// MapByteSlice maps this stream to an ByteSliceStream via f.
+func (s *Float32Stream) MapByteSlice(f func (float32) []byte) *ByteSliceStream {
+	return FromByteSliceObservable(MapFloat322ByteSliceObserveNext(s, f))
+}
+
+func (s *Float32Stream) FlatMapByteSlice(f func (float32) ByteSliceObservable) *ByteSliceStream {
+	return &ByteSliceStream{&flatMapFloat322ByteSlice{s, f}}
+}
+
+
+
 
 
 type Float64Observer interface {
@@ -38877,6 +40107,88 @@ func (s *Float64Stream) FlatMapDuration(f func (float64) DurationObservable) *Du
 
 
 
+type MappingFloat642ByteSliceFunc func(next float64, err error, complete bool, observer ByteSliceObserver)
+type MappingFloat642ByteSliceFuncFactory func (observer ByteSliceObserver) MappingFloat642ByteSliceFunc
+
+type MappingFloat642ByteSliceObservable struct {
+	parent  Float64Observable
+	mapper MappingFloat642ByteSliceFuncFactory
+}
+
+func (f *MappingFloat642ByteSliceObservable) Subscribe(observer ByteSliceObserver) Subscription {
+	mapper := f.mapper(observer)
+	return f.parent.Subscribe(Float64ObserverFunc(func(next float64, err error, complete bool) {
+		mapper(next, err, complete, observer)
+	}))
+}
+
+func MapFloat642ByteSliceObservable(parent Float64Observable, mapper MappingFloat642ByteSliceFuncFactory) ByteSliceObservable {
+	return &MappingFloat642ByteSliceObservable{
+		parent:  parent,
+		mapper: mapper,
+	}
+}
+
+func MapFloat642ByteSliceObserveDirect(parent Float64Observable, mapper MappingFloat642ByteSliceFunc) ByteSliceObservable {
+	return MapFloat642ByteSliceObservable(parent, func(ByteSliceObserver) MappingFloat642ByteSliceFunc {
+		return mapper
+	})
+}
+
+func MapFloat642ByteSliceObserveNext(parent Float64Observable, mapper func(float64) []byte) ByteSliceObservable {
+	return MapFloat642ByteSliceObservable(parent, func(ByteSliceObserver) MappingFloat642ByteSliceFunc {
+			return func(next float64, err error, complete bool, observer ByteSliceObserver) {
+				var mapped []byte
+				if err == nil && !complete {
+					mapped = mapper(next)
+				}
+				PassthroughByteSlice(mapped, err, complete, observer)
+			}
+		},
+	)
+}
+
+type flatMapFloat642ByteSlice struct {
+	parent Float64Observable
+	mapper func (float64) ByteSliceObservable
+}
+
+func (f *flatMapFloat642ByteSlice) Subscribe(observer ByteSliceObserver) Subscription {
+	subscription := NewGenericSubscription()
+	wg := sync.WaitGroup{}
+	f.parent.Subscribe(Float64ObserverFunc(func (next float64, err error, complete bool) {
+		switch {
+		case err != nil:
+			wg.Wait()
+			observer.Error(err)
+		case complete:
+			wg.Wait()
+			observer.Complete()
+		default:
+			wg.Add(1)
+			observable := f.mapper(next)
+			stream := (&ByteSliceStream{observable}).
+				DoOnComplete(func() { wg.Done() }).
+				DoOnError(func(error) { wg.Done() })
+			stream = &ByteSliceStream{ignoreCompletionFilter().ByteSlice(stream)}
+			stream.Subscribe(observer)
+		}
+	}))
+	return subscription
+}
+
+
+// MapByteSlice maps this stream to an ByteSliceStream via f.
+func (s *Float64Stream) MapByteSlice(f func (float64) []byte) *ByteSliceStream {
+	return FromByteSliceObservable(MapFloat642ByteSliceObserveNext(s, f))
+}
+
+func (s *Float64Stream) FlatMapByteSlice(f func (float64) ByteSliceObservable) *ByteSliceStream {
+	return &ByteSliceStream{&flatMapFloat642ByteSlice{s, f}}
+}
+
+
+
 
 
 type Complex64Observer interface {
@@ -41194,6 +42506,88 @@ func (s *Complex64Stream) MapDuration(f func (complex64) time.Duration) *Duratio
 
 func (s *Complex64Stream) FlatMapDuration(f func (complex64) DurationObservable) *DurationStream {
 	return &DurationStream{&flatMapComplex642Duration{s, f}}
+}
+
+
+
+type MappingComplex642ByteSliceFunc func(next complex64, err error, complete bool, observer ByteSliceObserver)
+type MappingComplex642ByteSliceFuncFactory func (observer ByteSliceObserver) MappingComplex642ByteSliceFunc
+
+type MappingComplex642ByteSliceObservable struct {
+	parent  Complex64Observable
+	mapper MappingComplex642ByteSliceFuncFactory
+}
+
+func (f *MappingComplex642ByteSliceObservable) Subscribe(observer ByteSliceObserver) Subscription {
+	mapper := f.mapper(observer)
+	return f.parent.Subscribe(Complex64ObserverFunc(func(next complex64, err error, complete bool) {
+		mapper(next, err, complete, observer)
+	}))
+}
+
+func MapComplex642ByteSliceObservable(parent Complex64Observable, mapper MappingComplex642ByteSliceFuncFactory) ByteSliceObservable {
+	return &MappingComplex642ByteSliceObservable{
+		parent:  parent,
+		mapper: mapper,
+	}
+}
+
+func MapComplex642ByteSliceObserveDirect(parent Complex64Observable, mapper MappingComplex642ByteSliceFunc) ByteSliceObservable {
+	return MapComplex642ByteSliceObservable(parent, func(ByteSliceObserver) MappingComplex642ByteSliceFunc {
+		return mapper
+	})
+}
+
+func MapComplex642ByteSliceObserveNext(parent Complex64Observable, mapper func(complex64) []byte) ByteSliceObservable {
+	return MapComplex642ByteSliceObservable(parent, func(ByteSliceObserver) MappingComplex642ByteSliceFunc {
+			return func(next complex64, err error, complete bool, observer ByteSliceObserver) {
+				var mapped []byte
+				if err == nil && !complete {
+					mapped = mapper(next)
+				}
+				PassthroughByteSlice(mapped, err, complete, observer)
+			}
+		},
+	)
+}
+
+type flatMapComplex642ByteSlice struct {
+	parent Complex64Observable
+	mapper func (complex64) ByteSliceObservable
+}
+
+func (f *flatMapComplex642ByteSlice) Subscribe(observer ByteSliceObserver) Subscription {
+	subscription := NewGenericSubscription()
+	wg := sync.WaitGroup{}
+	f.parent.Subscribe(Complex64ObserverFunc(func (next complex64, err error, complete bool) {
+		switch {
+		case err != nil:
+			wg.Wait()
+			observer.Error(err)
+		case complete:
+			wg.Wait()
+			observer.Complete()
+		default:
+			wg.Add(1)
+			observable := f.mapper(next)
+			stream := (&ByteSliceStream{observable}).
+				DoOnComplete(func() { wg.Done() }).
+				DoOnError(func(error) { wg.Done() })
+			stream = &ByteSliceStream{ignoreCompletionFilter().ByteSlice(stream)}
+			stream.Subscribe(observer)
+		}
+	}))
+	return subscription
+}
+
+
+// MapByteSlice maps this stream to an ByteSliceStream via f.
+func (s *Complex64Stream) MapByteSlice(f func (complex64) []byte) *ByteSliceStream {
+	return FromByteSliceObservable(MapComplex642ByteSliceObserveNext(s, f))
+}
+
+func (s *Complex64Stream) FlatMapByteSlice(f func (complex64) ByteSliceObservable) *ByteSliceStream {
+	return &ByteSliceStream{&flatMapComplex642ByteSlice{s, f}}
 }
 
 
@@ -43519,6 +44913,88 @@ func (s *Complex128Stream) FlatMapDuration(f func (complex128) DurationObservabl
 
 
 
+type MappingComplex1282ByteSliceFunc func(next complex128, err error, complete bool, observer ByteSliceObserver)
+type MappingComplex1282ByteSliceFuncFactory func (observer ByteSliceObserver) MappingComplex1282ByteSliceFunc
+
+type MappingComplex1282ByteSliceObservable struct {
+	parent  Complex128Observable
+	mapper MappingComplex1282ByteSliceFuncFactory
+}
+
+func (f *MappingComplex1282ByteSliceObservable) Subscribe(observer ByteSliceObserver) Subscription {
+	mapper := f.mapper(observer)
+	return f.parent.Subscribe(Complex128ObserverFunc(func(next complex128, err error, complete bool) {
+		mapper(next, err, complete, observer)
+	}))
+}
+
+func MapComplex1282ByteSliceObservable(parent Complex128Observable, mapper MappingComplex1282ByteSliceFuncFactory) ByteSliceObservable {
+	return &MappingComplex1282ByteSliceObservable{
+		parent:  parent,
+		mapper: mapper,
+	}
+}
+
+func MapComplex1282ByteSliceObserveDirect(parent Complex128Observable, mapper MappingComplex1282ByteSliceFunc) ByteSliceObservable {
+	return MapComplex1282ByteSliceObservable(parent, func(ByteSliceObserver) MappingComplex1282ByteSliceFunc {
+		return mapper
+	})
+}
+
+func MapComplex1282ByteSliceObserveNext(parent Complex128Observable, mapper func(complex128) []byte) ByteSliceObservable {
+	return MapComplex1282ByteSliceObservable(parent, func(ByteSliceObserver) MappingComplex1282ByteSliceFunc {
+			return func(next complex128, err error, complete bool, observer ByteSliceObserver) {
+				var mapped []byte
+				if err == nil && !complete {
+					mapped = mapper(next)
+				}
+				PassthroughByteSlice(mapped, err, complete, observer)
+			}
+		},
+	)
+}
+
+type flatMapComplex1282ByteSlice struct {
+	parent Complex128Observable
+	mapper func (complex128) ByteSliceObservable
+}
+
+func (f *flatMapComplex1282ByteSlice) Subscribe(observer ByteSliceObserver) Subscription {
+	subscription := NewGenericSubscription()
+	wg := sync.WaitGroup{}
+	f.parent.Subscribe(Complex128ObserverFunc(func (next complex128, err error, complete bool) {
+		switch {
+		case err != nil:
+			wg.Wait()
+			observer.Error(err)
+		case complete:
+			wg.Wait()
+			observer.Complete()
+		default:
+			wg.Add(1)
+			observable := f.mapper(next)
+			stream := (&ByteSliceStream{observable}).
+				DoOnComplete(func() { wg.Done() }).
+				DoOnError(func(error) { wg.Done() })
+			stream = &ByteSliceStream{ignoreCompletionFilter().ByteSlice(stream)}
+			stream.Subscribe(observer)
+		}
+	}))
+	return subscription
+}
+
+
+// MapByteSlice maps this stream to an ByteSliceStream via f.
+func (s *Complex128Stream) MapByteSlice(f func (complex128) []byte) *ByteSliceStream {
+	return FromByteSliceObservable(MapComplex1282ByteSliceObserveNext(s, f))
+}
+
+func (s *Complex128Stream) FlatMapByteSlice(f func (complex128) ByteSliceObservable) *ByteSliceStream {
+	return &ByteSliceStream{&flatMapComplex1282ByteSlice{s, f}}
+}
+
+
+
 
 
 type TimeObserver interface {
@@ -45840,6 +47316,88 @@ func (s *TimeStream) FlatMapDuration(f func (time.Time) DurationObservable) *Dur
 
 
 
+type MappingTime2ByteSliceFunc func(next time.Time, err error, complete bool, observer ByteSliceObserver)
+type MappingTime2ByteSliceFuncFactory func (observer ByteSliceObserver) MappingTime2ByteSliceFunc
+
+type MappingTime2ByteSliceObservable struct {
+	parent  TimeObservable
+	mapper MappingTime2ByteSliceFuncFactory
+}
+
+func (f *MappingTime2ByteSliceObservable) Subscribe(observer ByteSliceObserver) Subscription {
+	mapper := f.mapper(observer)
+	return f.parent.Subscribe(TimeObserverFunc(func(next time.Time, err error, complete bool) {
+		mapper(next, err, complete, observer)
+	}))
+}
+
+func MapTime2ByteSliceObservable(parent TimeObservable, mapper MappingTime2ByteSliceFuncFactory) ByteSliceObservable {
+	return &MappingTime2ByteSliceObservable{
+		parent:  parent,
+		mapper: mapper,
+	}
+}
+
+func MapTime2ByteSliceObserveDirect(parent TimeObservable, mapper MappingTime2ByteSliceFunc) ByteSliceObservable {
+	return MapTime2ByteSliceObservable(parent, func(ByteSliceObserver) MappingTime2ByteSliceFunc {
+		return mapper
+	})
+}
+
+func MapTime2ByteSliceObserveNext(parent TimeObservable, mapper func(time.Time) []byte) ByteSliceObservable {
+	return MapTime2ByteSliceObservable(parent, func(ByteSliceObserver) MappingTime2ByteSliceFunc {
+			return func(next time.Time, err error, complete bool, observer ByteSliceObserver) {
+				var mapped []byte
+				if err == nil && !complete {
+					mapped = mapper(next)
+				}
+				PassthroughByteSlice(mapped, err, complete, observer)
+			}
+		},
+	)
+}
+
+type flatMapTime2ByteSlice struct {
+	parent TimeObservable
+	mapper func (time.Time) ByteSliceObservable
+}
+
+func (f *flatMapTime2ByteSlice) Subscribe(observer ByteSliceObserver) Subscription {
+	subscription := NewGenericSubscription()
+	wg := sync.WaitGroup{}
+	f.parent.Subscribe(TimeObserverFunc(func (next time.Time, err error, complete bool) {
+		switch {
+		case err != nil:
+			wg.Wait()
+			observer.Error(err)
+		case complete:
+			wg.Wait()
+			observer.Complete()
+		default:
+			wg.Add(1)
+			observable := f.mapper(next)
+			stream := (&ByteSliceStream{observable}).
+				DoOnComplete(func() { wg.Done() }).
+				DoOnError(func(error) { wg.Done() })
+			stream = &ByteSliceStream{ignoreCompletionFilter().ByteSlice(stream)}
+			stream.Subscribe(observer)
+		}
+	}))
+	return subscription
+}
+
+
+// MapByteSlice maps this stream to an ByteSliceStream via f.
+func (s *TimeStream) MapByteSlice(f func (time.Time) []byte) *ByteSliceStream {
+	return FromByteSliceObservable(MapTime2ByteSliceObserveNext(s, f))
+}
+
+func (s *TimeStream) FlatMapByteSlice(f func (time.Time) ByteSliceObservable) *ByteSliceStream {
+	return &ByteSliceStream{&flatMapTime2ByteSlice{s, f}}
+}
+
+
+
 
 
 type DurationObserver interface {
@@ -48157,6 +49715,2491 @@ func (s *DurationStream) Map(f func (time.Duration) time.Duration) *DurationStre
 
 func (s *DurationStream) FlatMap(f func (time.Duration) DurationObservable) *DurationStream {
 	return &DurationStream{&flatMapDuration2Duration{s, f}}
+}
+
+
+
+type MappingDuration2ByteSliceFunc func(next time.Duration, err error, complete bool, observer ByteSliceObserver)
+type MappingDuration2ByteSliceFuncFactory func (observer ByteSliceObserver) MappingDuration2ByteSliceFunc
+
+type MappingDuration2ByteSliceObservable struct {
+	parent  DurationObservable
+	mapper MappingDuration2ByteSliceFuncFactory
+}
+
+func (f *MappingDuration2ByteSliceObservable) Subscribe(observer ByteSliceObserver) Subscription {
+	mapper := f.mapper(observer)
+	return f.parent.Subscribe(DurationObserverFunc(func(next time.Duration, err error, complete bool) {
+		mapper(next, err, complete, observer)
+	}))
+}
+
+func MapDuration2ByteSliceObservable(parent DurationObservable, mapper MappingDuration2ByteSliceFuncFactory) ByteSliceObservable {
+	return &MappingDuration2ByteSliceObservable{
+		parent:  parent,
+		mapper: mapper,
+	}
+}
+
+func MapDuration2ByteSliceObserveDirect(parent DurationObservable, mapper MappingDuration2ByteSliceFunc) ByteSliceObservable {
+	return MapDuration2ByteSliceObservable(parent, func(ByteSliceObserver) MappingDuration2ByteSliceFunc {
+		return mapper
+	})
+}
+
+func MapDuration2ByteSliceObserveNext(parent DurationObservable, mapper func(time.Duration) []byte) ByteSliceObservable {
+	return MapDuration2ByteSliceObservable(parent, func(ByteSliceObserver) MappingDuration2ByteSliceFunc {
+			return func(next time.Duration, err error, complete bool, observer ByteSliceObserver) {
+				var mapped []byte
+				if err == nil && !complete {
+					mapped = mapper(next)
+				}
+				PassthroughByteSlice(mapped, err, complete, observer)
+			}
+		},
+	)
+}
+
+type flatMapDuration2ByteSlice struct {
+	parent DurationObservable
+	mapper func (time.Duration) ByteSliceObservable
+}
+
+func (f *flatMapDuration2ByteSlice) Subscribe(observer ByteSliceObserver) Subscription {
+	subscription := NewGenericSubscription()
+	wg := sync.WaitGroup{}
+	f.parent.Subscribe(DurationObserverFunc(func (next time.Duration, err error, complete bool) {
+		switch {
+		case err != nil:
+			wg.Wait()
+			observer.Error(err)
+		case complete:
+			wg.Wait()
+			observer.Complete()
+		default:
+			wg.Add(1)
+			observable := f.mapper(next)
+			stream := (&ByteSliceStream{observable}).
+				DoOnComplete(func() { wg.Done() }).
+				DoOnError(func(error) { wg.Done() })
+			stream = &ByteSliceStream{ignoreCompletionFilter().ByteSlice(stream)}
+			stream.Subscribe(observer)
+		}
+	}))
+	return subscription
+}
+
+
+// MapByteSlice maps this stream to an ByteSliceStream via f.
+func (s *DurationStream) MapByteSlice(f func (time.Duration) []byte) *ByteSliceStream {
+	return FromByteSliceObservable(MapDuration2ByteSliceObserveNext(s, f))
+}
+
+func (s *DurationStream) FlatMapByteSlice(f func (time.Duration) ByteSliceObservable) *ByteSliceStream {
+	return &ByteSliceStream{&flatMapDuration2ByteSlice{s, f}}
+}
+
+
+
+
+
+type ByteSliceObserver interface {
+	Next([]byte)
+	TerminationObserver
+}
+
+// A ByteSliceSubscriber represents a subscribed ByteSliceObserver.
+type ByteSliceSubscriber interface {
+	Subscription
+	ByteSliceObserver
+}
+
+type implByteSliceSubscriber struct {
+	Subscription
+	ByteSliceObserver
+}
+
+func ByteSliceObserverAsGenericObserver(observer ByteSliceObserver) GenericObserver {
+	return NewGenericObserverFunc(func(next interface{}, err error, complete bool) {
+		switch {
+		case err != nil:
+			observer.Error(err)
+		case complete:
+			observer.Complete()
+		default:
+			observer.Next(next.([]byte))
+		}
+	})
+}
+
+func GenericObserverAsByteSliceObserver(observer GenericObserver) ByteSliceObserver {
+	return ByteSliceObserverFunc(func(next []byte, err error, complete bool) {
+		switch {
+		case err != nil:
+			observer.Error(err)
+		case complete:
+			observer.Complete()
+		default:
+			observer.Next(next)
+		}
+	})
+}
+
+type ByteSliceObservableFactory func (observer ByteSliceObserver, subscription Subscription)
+
+func (f ByteSliceObservableFactory) Subscribe(observer ByteSliceObserver) Subscription {
+	subscription := NewGenericSubscription()
+	go f(observer, subscription)
+	return subscription
+}
+
+// CreateByteSlice calls f(observer, subscription) to produce values for a stream.
+func CreateByteSlice(f func (observer ByteSliceObserver, subscription Subscription)) *ByteSliceStream {
+	return FromByteSliceObservable(ByteSliceObservableFactory(f))
+}
+
+// Repeat value count times.
+func RepeatByteSlice(value []byte, count int) *ByteSliceStream {
+	return CreateByteSlice(func (observer ByteSliceObserver, subscription Subscription) {
+		for i := 0; i < count; i++ {
+			if subscription.Disposed() {
+				return
+			}
+			observer.Next(value)
+		}
+		observer.Complete()
+	})
+}
+
+// StartByteSlice is designed to be used with functions that return a
+// ([]byte, error) tuple.
+//
+// If the error is non-nil the returned ByteSliceStream will be that error,
+// otherwise it will be a single-value stream of []byte.
+func StartByteSlice(f func () ([]byte, error)) *ByteSliceStream {
+	return CreateByteSlice(func (observer ByteSliceObserver, subscription Subscription) {
+		if v, err := f(); err != nil {
+			observer.Error(err)
+		} else {
+			observer.Next(v)
+			observer.Complete()
+		}
+	})
+}
+
+func PassthroughByteSlice(next []byte, err error, complete bool, observer ByteSliceObserver) {
+	switch {
+	case err != nil:
+		observer.Error(err)
+	case complete:
+		observer.Complete()
+	default:
+		observer.Next(next)
+	}
+}
+
+var zeroByteSlice = *new([]byte)
+
+type ByteSliceObserverFunc func([]byte, error, bool)
+
+func (f ByteSliceObserverFunc) Next(next []byte) { f(next, nil, false) }
+func (f ByteSliceObserverFunc) Error(err error)  { f(zeroByteSlice, err, false) }
+func (f ByteSliceObserverFunc) Complete()        { f(zeroByteSlice, nil, true) }
+
+type ByteSliceObservable interface {
+	Subscribe(ByteSliceObserver) Subscription
+}
+
+// Convert a GenericObservableFilter to a ByteSliceObservable
+func (f GenericObservableFilterFactory) ByteSlice(parent ByteSliceObservable) ByteSliceObservable {
+	return MapByteSlice2ByteSliceObservable(parent, func(observer ByteSliceObserver) MappingByteSlice2ByteSliceFunc {
+			gobserver := ByteSliceObserverAsGenericObserver(observer)
+			filter := f(gobserver)
+			return func(next []byte, err error, complete bool, observer ByteSliceObserver) {
+				filter(next, err, complete, gobserver)
+			}
+		},
+	)
+}
+
+func NeverByteSlice() *ByteSliceStream {
+	return CreateByteSlice(func (observer ByteSliceObserver, subscription Subscription) {})
+}
+
+func EmptyByteSlice() *ByteSliceStream {
+	return CreateByteSlice(func (observer ByteSliceObserver, subscription Subscription) {
+		observer.Complete()
+	})
+}
+
+func ThrowByteSlice(err error) *ByteSliceStream {
+	return CreateByteSlice(func (observer ByteSliceObserver, subscription Subscription) {
+		observer.Error(err)
+	})
+}
+
+func FromByteSliceArray(array [][]byte) *ByteSliceStream {
+	return CreateByteSlice(func (observer ByteSliceObserver, subscription Subscription) {
+		for _, v := range array {
+			if subscription.Disposed() {
+				return
+			}
+			observer.Next(v)
+		}
+		observer.Complete()
+		subscription.Dispose()
+	})
+}
+
+func FromByteSlices(array ...[]byte) *ByteSliceStream {
+	return FromByteSliceArray(array)
+}
+
+func JustByteSlice(element []byte) *ByteSliceStream {
+	return FromByteSliceArray([][]byte{element})
+}
+
+func MergeByteSlice(observables ... ByteSliceObservable) *ByteSliceStream {
+	if len(observables) == 0 {
+		return EmptyByteSlice()
+	}
+	return (&ByteSliceStream{observables[0]}).Merge(observables[1:]...)
+}
+
+func MergeByteSliceDelayError(observables ... ByteSliceObservable) *ByteSliceStream {
+	if len(observables) == 0 {
+		return EmptyByteSlice()
+	}
+	return (&ByteSliceStream{observables[0]}).MergeDelayError(observables[1:]...)
+}
+
+func FromByteSliceChannel(ch <-chan []byte) *ByteSliceStream {
+	return CreateByteSlice(func (observer ByteSliceObserver, subscription Subscription) {
+		for v := range ch {
+			if subscription.Disposed() {
+				return
+			}
+			observer.Next(v)
+		}
+		observer.Complete()
+	})
+}
+
+type ByteSliceStream struct {
+	ByteSliceObservable
+}
+
+func FromByteSliceObservable(observable ByteSliceObservable) *ByteSliceStream {
+	return &ByteSliceStream{observable}
+}
+
+func (s *ByteSliceStream) SubscribeFunc(f func([]byte, error, bool)) Subscription {
+	return s.Subscribe(ByteSliceObserverFunc(f))
+}
+
+func (s *ByteSliceStream) SubscribeNext(f func (v []byte)) Subscription {
+	return s.SubscribeFunc(func (next []byte, err error, complete bool) {
+		if err == nil && !complete {
+			f(next)
+		}
+	})
+}
+
+// Distinct removes duplicate elements in the stream.
+func (s *ByteSliceStream) Distinct() *ByteSliceStream {
+	return FromByteSliceObservable(distinctFilter().ByteSlice(s))
+}
+
+// ElementAt yields the Nth element of the stream.
+func (s *ByteSliceStream) ElementAt(n int) *ByteSliceStream {
+	return FromByteSliceObservable(elementAtFilter(n).ByteSlice(s))
+}
+
+// Filter elements in the stream on a function.
+func (s *ByteSliceStream) Filter(f func([]byte) bool) *ByteSliceStream {
+	return FromByteSliceObservable(filterFilter(func(v interface{}) bool { return f(v.([]byte)) }).ByteSlice(s))
+}
+
+// Last returns just the first element of the stream.
+func (s *ByteSliceStream) First() *ByteSliceStream {
+	return FromByteSliceObservable(firstFilter().ByteSlice(s))
+}
+
+// Last returns just the last element of the stream.
+func (s *ByteSliceStream) Last() *ByteSliceStream {
+	return FromByteSliceObservable(lastFilter().ByteSlice(s))
+}
+
+// SkipLast skips the first N elements of the stream.
+func (s *ByteSliceStream) Skip(n int) *ByteSliceStream {
+	return FromByteSliceObservable(skipFilter(n).ByteSlice(s))
+}
+
+// SkipLast skips the last N elements of the stream.
+func (s *ByteSliceStream) SkipLast(n int) *ByteSliceStream {
+	return FromByteSliceObservable(skipLastFilter(n).ByteSlice(s))
+}
+
+// Take returns just the first N elements of the stream.
+func (s *ByteSliceStream) Take(n int) *ByteSliceStream {
+	return FromByteSliceObservable(takeFilter(n).ByteSlice(s))
+}
+
+// TakeLast returns just the last N elements of the stream.
+func (s *ByteSliceStream) TakeLast(n int) *ByteSliceStream {
+	return FromByteSliceObservable(takeLastFilter(n).ByteSlice(s))
+}
+
+// IgnoreElements ignores elements of the stream and emits only the completion events.
+func (s *ByteSliceStream) IgnoreElements() *ByteSliceStream {
+	return FromByteSliceObservable(ignoreElementsFilter().ByteSlice(s))
+}
+
+func (s *ByteSliceStream) Replay(size int, duration time.Duration) *ByteSliceStream {
+	return FromByteSliceObservable(replayFilter(size, duration).ByteSlice(s))
+}
+
+func (s *ByteSliceStream) Sample(duration time.Duration) *ByteSliceStream {
+	return FromByteSliceObservable(sampleFilter(duration).ByteSlice(s))
+}
+
+func (s *ByteSliceStream) Debounce(duration time.Duration) *ByteSliceStream {
+	return FromByteSliceObservable(debounceFilter(duration).ByteSlice(s))
+}
+
+// Wait for completion of the stream and return any error.
+func (s *ByteSliceStream) Wait() error {
+	errch := make(chan error, 1)
+	s.SubscribeFunc(func(next []byte, err error, complete bool) {
+		switch {
+		case err != nil:
+			errch <- err
+		case complete:
+			errch <- nil
+		default:
+		}
+	})
+	return <-errch
+}
+
+func MakeByteSliceSubscriber(observer ByteSliceObserver) ByteSliceSubscriber {
+	if subscriber, ok := observer.(ByteSliceSubscriber); ok {
+		return subscriber
+	}
+	return &implByteSliceSubscriber{NewGenericSubscription(), observer}
+}
+
+type concatByteSliceSubscriber struct {
+	observable   int
+	observer     ByteSliceObserver
+	observables  []ByteSliceObservable
+	Subscription
+}
+
+func (c *concatByteSliceSubscriber) Next(next []byte) {
+	c.observer.Next(next)
+}
+
+func (c *concatByteSliceSubscriber) Error(err error) {
+	c.observer.Error(err)
+	c.observable = len(c.observables)
+	c.Dispose()
+}
+
+func (c *concatByteSliceSubscriber) Complete() {
+	c.observable++
+	if c.observable >= len(c.observables) {
+		c.observer.Complete()
+		c.Dispose()
+		return
+	}
+	c.observables[c.observable].Subscribe(c)
+}
+
+type concatByteSliceObservable struct {
+	observables []ByteSliceObservable
+}
+
+func (m *concatByteSliceObservable) Subscribe(observer ByteSliceObserver) Subscription {
+	if len(m.observables) == 0 {
+		observer.Complete()
+		return ClosedSubscription
+	}
+	subscriber := &concatByteSliceSubscriber{
+		observer:     observer,
+		Subscription: NewGenericSubscription(),
+		observables:  m.observables,
+	}
+	m.observables[0].Subscribe(subscriber)
+	return subscriber
+}
+
+func (s *ByteSliceStream) Concat(observables ... ByteSliceObservable) *ByteSliceStream {
+	return &ByteSliceStream{&concatByteSliceObservable{append([]ByteSliceObservable{s}, observables...)} }
+}
+
+type mergeByteSliceObservable struct {
+	delayError bool
+	observables []ByteSliceObservable
+}
+
+func (m *mergeByteSliceObservable) Subscribe(observer ByteSliceObserver) Subscription {
+	subscription := NewGenericSubscription()
+	lock := sync.Mutex{}
+	completed := 0
+	var firstError error
+	relay := func(next []byte, err error, complete bool) {
+		lock.Lock()
+		defer lock.Unlock()
+		if completed >= len(m.observables) {
+			return
+		}
+
+		switch {
+		case err != nil:
+			if m.delayError {
+				firstError = err
+				completed++
+			} else {
+				observer.Error(err)
+				completed = len(m.observables)
+			}
+
+		case complete:
+			completed++
+			if completed == len(m.observables) {
+				if firstError != nil {
+					observer.Error(firstError)
+				} else {
+					observer.Complete()
+				}
+			}
+		default:
+			observer.Next(next)
+		}
+	}
+	for _, observable := range m.observables {
+		observable.Subscribe(ByteSliceObserverFunc(relay))
+	}
+	return subscription
+}
+
+// Merge an arbitrary number of observables with this one.
+// An error from any of the observables will terminate the merged stream.
+func (s *ByteSliceStream) Merge(other ... ByteSliceObservable) *ByteSliceStream {
+	if len(other) == 0 {
+		return s
+	}
+	return &ByteSliceStream{&mergeByteSliceObservable{false, append(other, s) } }
+}
+
+// Merge an arbitrary number of observables with this one.
+// Any error will be deferred until all observables terminate.
+func (s *ByteSliceStream) MergeDelayError(other ... ByteSliceObservable) *ByteSliceStream {
+	if len(other) == 0 {
+		return s
+	}
+	return &ByteSliceStream{&mergeByteSliceObservable{true, append(other, s) } }
+}
+
+type catchByteSliceObservable struct {
+	parent ByteSliceObservable
+	catch ByteSliceObservable
+}
+
+func (r *catchByteSliceObservable) Subscribe(observer ByteSliceObserver) Subscription {
+	subscription := NewGenericSubscription()
+	run := func(next []byte, err error, complete bool) {
+		switch {
+		case err != nil:
+			r.catch.Subscribe(observer)
+		case complete:
+			observer.Complete()
+		default:
+			observer.Next(next)
+		}
+	}
+	r.parent.Subscribe(ByteSliceObserverFunc(run))
+	return subscription
+}
+
+func (s *ByteSliceStream) Catch(catch ByteSliceObservable) *ByteSliceStream {
+	return &ByteSliceStream{ &catchByteSliceObservable{s, catch} }
+}
+
+type retryByteSliceObservable struct {
+	observable ByteSliceObservable
+}
+
+type retryByteSliceObserver struct {
+	observable ByteSliceObservable
+	observer ByteSliceObserver
+}
+
+func (r *retryByteSliceObserver) retry(next []byte, err error, complete bool) {
+	switch {
+	case err != nil:
+		r.observable.Subscribe(ByteSliceObserverFunc(r.retry))
+	case complete:
+		r.observer.Complete()
+	default:
+		r.observer.Next(next)
+	}
+}
+
+func (r *retryByteSliceObservable) Subscribe(observer ByteSliceObserver) Subscription {
+	subscription := NewGenericSubscription()
+	ro := &retryByteSliceObserver{r.observable, observer}
+	r.observable.Subscribe(ByteSliceObserverFunc(ro.retry))
+	return subscription
+}
+
+func (s *ByteSliceStream) Retry() *ByteSliceStream {
+	return &ByteSliceStream{ &retryByteSliceObservable{s} }
+}
+
+// Do applies a function for each value passing through the stream.
+func (s *ByteSliceStream) Do(f func(next []byte)) *ByteSliceStream {
+	return FromByteSliceObservable(MapByteSlice2ByteSliceObserveNext(s, func(next []byte) []byte {
+		f(next)
+		return next
+	}))
+}
+
+// DoOnError applies a function for any error on the stream.
+func (s *ByteSliceStream) DoOnError(f func(err error)) *ByteSliceStream {
+	return FromByteSliceObservable(MapByteSlice2ByteSliceObserveDirect(s, func(next []byte, err error, complete bool, observer ByteSliceObserver) {
+		if err != nil {
+			f(err)
+		}
+		PassthroughByteSlice(next, err, complete, observer)
+	}))
+}
+
+// DoOnComplete applies a function when the stream completes.
+func (s *ByteSliceStream) DoOnComplete(f func()) *ByteSliceStream {
+	return FromByteSliceObservable(MapByteSlice2ByteSliceObserveDirect(s, func(next []byte, err error, complete bool, observer ByteSliceObserver) {
+		if complete {
+			f()
+		}
+		PassthroughByteSlice(next, err, complete, observer)
+	}))
+}
+
+func (s *ByteSliceStream) Reduce(initial []byte, reducer func ([]byte, []byte) []byte) *ByteSliceStream {
+	value := initial
+	return FromByteSliceObservable(MapByteSlice2ByteSliceObserveDirect(s, func(next []byte, err error, complete bool, observer ByteSliceObserver) {
+		switch {
+		case err != nil:
+			observer.Next(value)
+			observer.Error(err)
+		case complete:
+			observer.Next(value)
+			observer.Complete()
+		default:
+			value = reducer(value, next)
+		}
+	}))
+}
+
+func (s *ByteSliceStream) Scan(initial []byte, f func ([]byte, []byte) []byte) *ByteSliceStream {
+	value := initial
+	return FromByteSliceObservable(MapByteSlice2ByteSliceObserveDirect(s, func(next []byte, err error, complete bool, observer ByteSliceObserver) {
+		switch {
+		case err != nil:
+			observer.Error(err)
+		case complete:
+			observer.Complete()
+		default:
+			value = f(value, next)
+			observer.Next(value)
+		}
+	}))
+}
+
+type timeoutByteSlice struct {
+	parent ByteSliceObservable
+	timeout time.Duration
+}
+
+func (t *timeoutByteSlice) Subscribe(observer ByteSliceObserver) Subscription {
+	subscription := NewChannelSubscription()
+	cancel := t.parent.Subscribe(observer)
+	go func() {
+		select {
+		case <-time.After(t.timeout):
+			observer.Error(ErrTimeout)
+			cancel.Dispose()
+			subscription.Dispose()
+		case <-subscription:
+			cancel.Dispose()
+		}
+	}()
+	return subscription
+}
+
+func (s *ByteSliceStream) Timeout(timeout time.Duration) *ByteSliceStream {
+	return &ByteSliceStream{&timeoutByteSlice{s, timeout}}
+}
+
+type forkedByteSliceStream struct {
+	lock sync.Mutex
+	parent ByteSliceObservable
+	observers []ByteSliceObserver
+}
+
+func (f *forkedByteSliceStream) Subscribe(observer ByteSliceObserver) Subscription {
+	f.lock.Lock()
+	defer f.lock.Unlock()
+	i := len(f.observers)
+	f.observers = append(f.observers, observer)
+	sub := new(CallbackSubscription)
+	*sub = CallbackSubscription(func() {
+		f.lock.Lock()
+		defer f.lock.Unlock()
+		f.observers[i] = nil
+	})
+	return sub
+}
+
+// Fork replicates each event from the parent to every subscriber of the fork.
+func (s *ByteSliceStream) Fork() *ByteSliceStream {
+	f := &forkedByteSliceStream{parent: s}
+	go s.Subscribe(ByteSliceObserverFunc(func(n []byte, err error, complete bool) {
+		f.lock.Lock()
+		defer f.lock.Unlock()
+		for _, o := range f.observers {
+			if o == nil {
+				continue
+			}
+			switch {
+			case err != nil:
+				o.Error(err)
+			case complete:
+				o.Complete()
+			default:
+				o.Next(n)
+			}
+		}
+	}))
+	return &ByteSliceStream{f}
+}
+
+// ToOneWithError blocks until the stream emits exactly one value. Otherwise, it errors.
+func (s *ByteSliceStream) ToOneWithError() ([]byte, error) {
+	valuech := make(chan []byte, 1)
+	errch := make(chan error, 1)
+	FromByteSliceObservable(oneFilter().ByteSlice(s)).SubscribeFunc(func (next []byte, err error, complete bool) {
+		if err != nil {
+			errch <- err
+		} else if !complete {
+			valuech <- next
+		}
+	})
+	select {
+	case value := <-valuech:
+		return value, nil
+	case err := <-errch:
+		return zeroByteSlice, err
+	}
+}
+
+// ToOne blocks and returns the only value emitted by the stream, or the zero
+// value if an error occurs.
+func (s *ByteSliceStream) ToOne() []byte {
+	value, _ := s.ToOneWithError()
+	return value
+}
+
+// ToArrayWithError collects all values from the stream into an array,
+// returning it and any error.
+func (s *ByteSliceStream) ToArrayWithError() ([][]byte, error) {
+	array := [][]byte{}
+	completech := make(chan bool, 1)
+	errch := make(chan error, 1)
+	s.SubscribeFunc(func(next []byte, err error, complete bool) {
+		switch {
+		case err != nil:
+			errch <- err
+		case complete:
+			completech <- true
+		default:
+			array = append(array, next)
+		}
+	})
+	select {
+	case <-completech:
+		return array, nil
+	case err := <-errch:
+		return array, err
+	}
+}
+
+// ToArray blocks and returns the values from the stream in an array.
+func (s *ByteSliceStream) ToArray() [][]byte {
+	out, _ := s.ToArrayWithError()
+	return out
+}
+
+// ToChannelWithError returns value and error channels corresponding to the stream elements and any error.
+func (s *ByteSliceStream) ToChannelWithError() (<-chan []byte, <-chan error) {
+	ch := make(chan []byte, 1)
+	errch := make(chan error, 1)
+	s.SubscribeFunc(func(next []byte, err error, complete bool) {
+		switch {
+		case err != nil:
+			errch <- err
+			close(errch)
+			close(ch)
+		case complete:
+			close(ch)
+		default:
+			ch <- next
+		}
+	})
+	return ch, errch
+}
+
+func (s *ByteSliceStream) ToChannel() <-chan []byte {
+	ch, _ := s.ToChannelWithError()
+	return ch
+}
+
+// Count returns an IntStream with the count of elements in this stream.
+func (s *ByteSliceStream) Count() *IntStream {
+	count := 0
+	return FromIntObservable(MapByteSlice2IntObserveDirect(s, func(next []byte, err error, complete bool, observer IntObserver) {
+		switch {
+		case err != nil:
+			observer.Next(count)
+			observer.Error(err)
+		case complete:
+			observer.Next(count)
+			observer.Complete()
+		default:
+			count++
+		}
+	}))
+}
+
+
+type MappingByteSlice2BoolFunc func(next []byte, err error, complete bool, observer BoolObserver)
+type MappingByteSlice2BoolFuncFactory func (observer BoolObserver) MappingByteSlice2BoolFunc
+
+type MappingByteSlice2BoolObservable struct {
+	parent  ByteSliceObservable
+	mapper MappingByteSlice2BoolFuncFactory
+}
+
+func (f *MappingByteSlice2BoolObservable) Subscribe(observer BoolObserver) Subscription {
+	mapper := f.mapper(observer)
+	return f.parent.Subscribe(ByteSliceObserverFunc(func(next []byte, err error, complete bool) {
+		mapper(next, err, complete, observer)
+	}))
+}
+
+func MapByteSlice2BoolObservable(parent ByteSliceObservable, mapper MappingByteSlice2BoolFuncFactory) BoolObservable {
+	return &MappingByteSlice2BoolObservable{
+		parent:  parent,
+		mapper: mapper,
+	}
+}
+
+func MapByteSlice2BoolObserveDirect(parent ByteSliceObservable, mapper MappingByteSlice2BoolFunc) BoolObservable {
+	return MapByteSlice2BoolObservable(parent, func(BoolObserver) MappingByteSlice2BoolFunc {
+		return mapper
+	})
+}
+
+func MapByteSlice2BoolObserveNext(parent ByteSliceObservable, mapper func([]byte) bool) BoolObservable {
+	return MapByteSlice2BoolObservable(parent, func(BoolObserver) MappingByteSlice2BoolFunc {
+			return func(next []byte, err error, complete bool, observer BoolObserver) {
+				var mapped bool
+				if err == nil && !complete {
+					mapped = mapper(next)
+				}
+				PassthroughBool(mapped, err, complete, observer)
+			}
+		},
+	)
+}
+
+type flatMapByteSlice2Bool struct {
+	parent ByteSliceObservable
+	mapper func ([]byte) BoolObservable
+}
+
+func (f *flatMapByteSlice2Bool) Subscribe(observer BoolObserver) Subscription {
+	subscription := NewGenericSubscription()
+	wg := sync.WaitGroup{}
+	f.parent.Subscribe(ByteSliceObserverFunc(func (next []byte, err error, complete bool) {
+		switch {
+		case err != nil:
+			wg.Wait()
+			observer.Error(err)
+		case complete:
+			wg.Wait()
+			observer.Complete()
+		default:
+			wg.Add(1)
+			observable := f.mapper(next)
+			stream := (&BoolStream{observable}).
+				DoOnComplete(func() { wg.Done() }).
+				DoOnError(func(error) { wg.Done() })
+			stream = &BoolStream{ignoreCompletionFilter().Bool(stream)}
+			stream.Subscribe(observer)
+		}
+	}))
+	return subscription
+}
+
+
+// MapBool maps this stream to an BoolStream via f.
+func (s *ByteSliceStream) MapBool(f func ([]byte) bool) *BoolStream {
+	return FromBoolObservable(MapByteSlice2BoolObserveNext(s, f))
+}
+
+func (s *ByteSliceStream) FlatMapBool(f func ([]byte) BoolObservable) *BoolStream {
+	return &BoolStream{&flatMapByteSlice2Bool{s, f}}
+}
+
+
+
+type MappingByteSlice2RuneFunc func(next []byte, err error, complete bool, observer RuneObserver)
+type MappingByteSlice2RuneFuncFactory func (observer RuneObserver) MappingByteSlice2RuneFunc
+
+type MappingByteSlice2RuneObservable struct {
+	parent  ByteSliceObservable
+	mapper MappingByteSlice2RuneFuncFactory
+}
+
+func (f *MappingByteSlice2RuneObservable) Subscribe(observer RuneObserver) Subscription {
+	mapper := f.mapper(observer)
+	return f.parent.Subscribe(ByteSliceObserverFunc(func(next []byte, err error, complete bool) {
+		mapper(next, err, complete, observer)
+	}))
+}
+
+func MapByteSlice2RuneObservable(parent ByteSliceObservable, mapper MappingByteSlice2RuneFuncFactory) RuneObservable {
+	return &MappingByteSlice2RuneObservable{
+		parent:  parent,
+		mapper: mapper,
+	}
+}
+
+func MapByteSlice2RuneObserveDirect(parent ByteSliceObservable, mapper MappingByteSlice2RuneFunc) RuneObservable {
+	return MapByteSlice2RuneObservable(parent, func(RuneObserver) MappingByteSlice2RuneFunc {
+		return mapper
+	})
+}
+
+func MapByteSlice2RuneObserveNext(parent ByteSliceObservable, mapper func([]byte) rune) RuneObservable {
+	return MapByteSlice2RuneObservable(parent, func(RuneObserver) MappingByteSlice2RuneFunc {
+			return func(next []byte, err error, complete bool, observer RuneObserver) {
+				var mapped rune
+				if err == nil && !complete {
+					mapped = mapper(next)
+				}
+				PassthroughRune(mapped, err, complete, observer)
+			}
+		},
+	)
+}
+
+type flatMapByteSlice2Rune struct {
+	parent ByteSliceObservable
+	mapper func ([]byte) RuneObservable
+}
+
+func (f *flatMapByteSlice2Rune) Subscribe(observer RuneObserver) Subscription {
+	subscription := NewGenericSubscription()
+	wg := sync.WaitGroup{}
+	f.parent.Subscribe(ByteSliceObserverFunc(func (next []byte, err error, complete bool) {
+		switch {
+		case err != nil:
+			wg.Wait()
+			observer.Error(err)
+		case complete:
+			wg.Wait()
+			observer.Complete()
+		default:
+			wg.Add(1)
+			observable := f.mapper(next)
+			stream := (&RuneStream{observable}).
+				DoOnComplete(func() { wg.Done() }).
+				DoOnError(func(error) { wg.Done() })
+			stream = &RuneStream{ignoreCompletionFilter().Rune(stream)}
+			stream.Subscribe(observer)
+		}
+	}))
+	return subscription
+}
+
+
+// MapRune maps this stream to an RuneStream via f.
+func (s *ByteSliceStream) MapRune(f func ([]byte) rune) *RuneStream {
+	return FromRuneObservable(MapByteSlice2RuneObserveNext(s, f))
+}
+
+func (s *ByteSliceStream) FlatMapRune(f func ([]byte) RuneObservable) *RuneStream {
+	return &RuneStream{&flatMapByteSlice2Rune{s, f}}
+}
+
+
+
+type MappingByteSlice2ByteFunc func(next []byte, err error, complete bool, observer ByteObserver)
+type MappingByteSlice2ByteFuncFactory func (observer ByteObserver) MappingByteSlice2ByteFunc
+
+type MappingByteSlice2ByteObservable struct {
+	parent  ByteSliceObservable
+	mapper MappingByteSlice2ByteFuncFactory
+}
+
+func (f *MappingByteSlice2ByteObservable) Subscribe(observer ByteObserver) Subscription {
+	mapper := f.mapper(observer)
+	return f.parent.Subscribe(ByteSliceObserverFunc(func(next []byte, err error, complete bool) {
+		mapper(next, err, complete, observer)
+	}))
+}
+
+func MapByteSlice2ByteObservable(parent ByteSliceObservable, mapper MappingByteSlice2ByteFuncFactory) ByteObservable {
+	return &MappingByteSlice2ByteObservable{
+		parent:  parent,
+		mapper: mapper,
+	}
+}
+
+func MapByteSlice2ByteObserveDirect(parent ByteSliceObservable, mapper MappingByteSlice2ByteFunc) ByteObservable {
+	return MapByteSlice2ByteObservable(parent, func(ByteObserver) MappingByteSlice2ByteFunc {
+		return mapper
+	})
+}
+
+func MapByteSlice2ByteObserveNext(parent ByteSliceObservable, mapper func([]byte) byte) ByteObservable {
+	return MapByteSlice2ByteObservable(parent, func(ByteObserver) MappingByteSlice2ByteFunc {
+			return func(next []byte, err error, complete bool, observer ByteObserver) {
+				var mapped byte
+				if err == nil && !complete {
+					mapped = mapper(next)
+				}
+				PassthroughByte(mapped, err, complete, observer)
+			}
+		},
+	)
+}
+
+type flatMapByteSlice2Byte struct {
+	parent ByteSliceObservable
+	mapper func ([]byte) ByteObservable
+}
+
+func (f *flatMapByteSlice2Byte) Subscribe(observer ByteObserver) Subscription {
+	subscription := NewGenericSubscription()
+	wg := sync.WaitGroup{}
+	f.parent.Subscribe(ByteSliceObserverFunc(func (next []byte, err error, complete bool) {
+		switch {
+		case err != nil:
+			wg.Wait()
+			observer.Error(err)
+		case complete:
+			wg.Wait()
+			observer.Complete()
+		default:
+			wg.Add(1)
+			observable := f.mapper(next)
+			stream := (&ByteStream{observable}).
+				DoOnComplete(func() { wg.Done() }).
+				DoOnError(func(error) { wg.Done() })
+			stream = &ByteStream{ignoreCompletionFilter().Byte(stream)}
+			stream.Subscribe(observer)
+		}
+	}))
+	return subscription
+}
+
+
+// MapByte maps this stream to an ByteStream via f.
+func (s *ByteSliceStream) MapByte(f func ([]byte) byte) *ByteStream {
+	return FromByteObservable(MapByteSlice2ByteObserveNext(s, f))
+}
+
+func (s *ByteSliceStream) FlatMapByte(f func ([]byte) ByteObservable) *ByteStream {
+	return &ByteStream{&flatMapByteSlice2Byte{s, f}}
+}
+
+
+
+type MappingByteSlice2StringFunc func(next []byte, err error, complete bool, observer StringObserver)
+type MappingByteSlice2StringFuncFactory func (observer StringObserver) MappingByteSlice2StringFunc
+
+type MappingByteSlice2StringObservable struct {
+	parent  ByteSliceObservable
+	mapper MappingByteSlice2StringFuncFactory
+}
+
+func (f *MappingByteSlice2StringObservable) Subscribe(observer StringObserver) Subscription {
+	mapper := f.mapper(observer)
+	return f.parent.Subscribe(ByteSliceObserverFunc(func(next []byte, err error, complete bool) {
+		mapper(next, err, complete, observer)
+	}))
+}
+
+func MapByteSlice2StringObservable(parent ByteSliceObservable, mapper MappingByteSlice2StringFuncFactory) StringObservable {
+	return &MappingByteSlice2StringObservable{
+		parent:  parent,
+		mapper: mapper,
+	}
+}
+
+func MapByteSlice2StringObserveDirect(parent ByteSliceObservable, mapper MappingByteSlice2StringFunc) StringObservable {
+	return MapByteSlice2StringObservable(parent, func(StringObserver) MappingByteSlice2StringFunc {
+		return mapper
+	})
+}
+
+func MapByteSlice2StringObserveNext(parent ByteSliceObservable, mapper func([]byte) string) StringObservable {
+	return MapByteSlice2StringObservable(parent, func(StringObserver) MappingByteSlice2StringFunc {
+			return func(next []byte, err error, complete bool, observer StringObserver) {
+				var mapped string
+				if err == nil && !complete {
+					mapped = mapper(next)
+				}
+				PassthroughString(mapped, err, complete, observer)
+			}
+		},
+	)
+}
+
+type flatMapByteSlice2String struct {
+	parent ByteSliceObservable
+	mapper func ([]byte) StringObservable
+}
+
+func (f *flatMapByteSlice2String) Subscribe(observer StringObserver) Subscription {
+	subscription := NewGenericSubscription()
+	wg := sync.WaitGroup{}
+	f.parent.Subscribe(ByteSliceObserverFunc(func (next []byte, err error, complete bool) {
+		switch {
+		case err != nil:
+			wg.Wait()
+			observer.Error(err)
+		case complete:
+			wg.Wait()
+			observer.Complete()
+		default:
+			wg.Add(1)
+			observable := f.mapper(next)
+			stream := (&StringStream{observable}).
+				DoOnComplete(func() { wg.Done() }).
+				DoOnError(func(error) { wg.Done() })
+			stream = &StringStream{ignoreCompletionFilter().String(stream)}
+			stream.Subscribe(observer)
+		}
+	}))
+	return subscription
+}
+
+
+// MapString maps this stream to an StringStream via f.
+func (s *ByteSliceStream) MapString(f func ([]byte) string) *StringStream {
+	return FromStringObservable(MapByteSlice2StringObserveNext(s, f))
+}
+
+func (s *ByteSliceStream) FlatMapString(f func ([]byte) StringObservable) *StringStream {
+	return &StringStream{&flatMapByteSlice2String{s, f}}
+}
+
+
+
+type MappingByteSlice2UintFunc func(next []byte, err error, complete bool, observer UintObserver)
+type MappingByteSlice2UintFuncFactory func (observer UintObserver) MappingByteSlice2UintFunc
+
+type MappingByteSlice2UintObservable struct {
+	parent  ByteSliceObservable
+	mapper MappingByteSlice2UintFuncFactory
+}
+
+func (f *MappingByteSlice2UintObservable) Subscribe(observer UintObserver) Subscription {
+	mapper := f.mapper(observer)
+	return f.parent.Subscribe(ByteSliceObserverFunc(func(next []byte, err error, complete bool) {
+		mapper(next, err, complete, observer)
+	}))
+}
+
+func MapByteSlice2UintObservable(parent ByteSliceObservable, mapper MappingByteSlice2UintFuncFactory) UintObservable {
+	return &MappingByteSlice2UintObservable{
+		parent:  parent,
+		mapper: mapper,
+	}
+}
+
+func MapByteSlice2UintObserveDirect(parent ByteSliceObservable, mapper MappingByteSlice2UintFunc) UintObservable {
+	return MapByteSlice2UintObservable(parent, func(UintObserver) MappingByteSlice2UintFunc {
+		return mapper
+	})
+}
+
+func MapByteSlice2UintObserveNext(parent ByteSliceObservable, mapper func([]byte) uint) UintObservable {
+	return MapByteSlice2UintObservable(parent, func(UintObserver) MappingByteSlice2UintFunc {
+			return func(next []byte, err error, complete bool, observer UintObserver) {
+				var mapped uint
+				if err == nil && !complete {
+					mapped = mapper(next)
+				}
+				PassthroughUint(mapped, err, complete, observer)
+			}
+		},
+	)
+}
+
+type flatMapByteSlice2Uint struct {
+	parent ByteSliceObservable
+	mapper func ([]byte) UintObservable
+}
+
+func (f *flatMapByteSlice2Uint) Subscribe(observer UintObserver) Subscription {
+	subscription := NewGenericSubscription()
+	wg := sync.WaitGroup{}
+	f.parent.Subscribe(ByteSliceObserverFunc(func (next []byte, err error, complete bool) {
+		switch {
+		case err != nil:
+			wg.Wait()
+			observer.Error(err)
+		case complete:
+			wg.Wait()
+			observer.Complete()
+		default:
+			wg.Add(1)
+			observable := f.mapper(next)
+			stream := (&UintStream{observable}).
+				DoOnComplete(func() { wg.Done() }).
+				DoOnError(func(error) { wg.Done() })
+			stream = &UintStream{ignoreCompletionFilter().Uint(stream)}
+			stream.Subscribe(observer)
+		}
+	}))
+	return subscription
+}
+
+
+// MapUint maps this stream to an UintStream via f.
+func (s *ByteSliceStream) MapUint(f func ([]byte) uint) *UintStream {
+	return FromUintObservable(MapByteSlice2UintObserveNext(s, f))
+}
+
+func (s *ByteSliceStream) FlatMapUint(f func ([]byte) UintObservable) *UintStream {
+	return &UintStream{&flatMapByteSlice2Uint{s, f}}
+}
+
+
+
+type MappingByteSlice2IntFunc func(next []byte, err error, complete bool, observer IntObserver)
+type MappingByteSlice2IntFuncFactory func (observer IntObserver) MappingByteSlice2IntFunc
+
+type MappingByteSlice2IntObservable struct {
+	parent  ByteSliceObservable
+	mapper MappingByteSlice2IntFuncFactory
+}
+
+func (f *MappingByteSlice2IntObservable) Subscribe(observer IntObserver) Subscription {
+	mapper := f.mapper(observer)
+	return f.parent.Subscribe(ByteSliceObserverFunc(func(next []byte, err error, complete bool) {
+		mapper(next, err, complete, observer)
+	}))
+}
+
+func MapByteSlice2IntObservable(parent ByteSliceObservable, mapper MappingByteSlice2IntFuncFactory) IntObservable {
+	return &MappingByteSlice2IntObservable{
+		parent:  parent,
+		mapper: mapper,
+	}
+}
+
+func MapByteSlice2IntObserveDirect(parent ByteSliceObservable, mapper MappingByteSlice2IntFunc) IntObservable {
+	return MapByteSlice2IntObservable(parent, func(IntObserver) MappingByteSlice2IntFunc {
+		return mapper
+	})
+}
+
+func MapByteSlice2IntObserveNext(parent ByteSliceObservable, mapper func([]byte) int) IntObservable {
+	return MapByteSlice2IntObservable(parent, func(IntObserver) MappingByteSlice2IntFunc {
+			return func(next []byte, err error, complete bool, observer IntObserver) {
+				var mapped int
+				if err == nil && !complete {
+					mapped = mapper(next)
+				}
+				PassthroughInt(mapped, err, complete, observer)
+			}
+		},
+	)
+}
+
+type flatMapByteSlice2Int struct {
+	parent ByteSliceObservable
+	mapper func ([]byte) IntObservable
+}
+
+func (f *flatMapByteSlice2Int) Subscribe(observer IntObserver) Subscription {
+	subscription := NewGenericSubscription()
+	wg := sync.WaitGroup{}
+	f.parent.Subscribe(ByteSliceObserverFunc(func (next []byte, err error, complete bool) {
+		switch {
+		case err != nil:
+			wg.Wait()
+			observer.Error(err)
+		case complete:
+			wg.Wait()
+			observer.Complete()
+		default:
+			wg.Add(1)
+			observable := f.mapper(next)
+			stream := (&IntStream{observable}).
+				DoOnComplete(func() { wg.Done() }).
+				DoOnError(func(error) { wg.Done() })
+			stream = &IntStream{ignoreCompletionFilter().Int(stream)}
+			stream.Subscribe(observer)
+		}
+	}))
+	return subscription
+}
+
+
+// MapInt maps this stream to an IntStream via f.
+func (s *ByteSliceStream) MapInt(f func ([]byte) int) *IntStream {
+	return FromIntObservable(MapByteSlice2IntObserveNext(s, f))
+}
+
+func (s *ByteSliceStream) FlatMapInt(f func ([]byte) IntObservable) *IntStream {
+	return &IntStream{&flatMapByteSlice2Int{s, f}}
+}
+
+
+
+type MappingByteSlice2Uint8Func func(next []byte, err error, complete bool, observer Uint8Observer)
+type MappingByteSlice2Uint8FuncFactory func (observer Uint8Observer) MappingByteSlice2Uint8Func
+
+type MappingByteSlice2Uint8Observable struct {
+	parent  ByteSliceObservable
+	mapper MappingByteSlice2Uint8FuncFactory
+}
+
+func (f *MappingByteSlice2Uint8Observable) Subscribe(observer Uint8Observer) Subscription {
+	mapper := f.mapper(observer)
+	return f.parent.Subscribe(ByteSliceObserverFunc(func(next []byte, err error, complete bool) {
+		mapper(next, err, complete, observer)
+	}))
+}
+
+func MapByteSlice2Uint8Observable(parent ByteSliceObservable, mapper MappingByteSlice2Uint8FuncFactory) Uint8Observable {
+	return &MappingByteSlice2Uint8Observable{
+		parent:  parent,
+		mapper: mapper,
+	}
+}
+
+func MapByteSlice2Uint8ObserveDirect(parent ByteSliceObservable, mapper MappingByteSlice2Uint8Func) Uint8Observable {
+	return MapByteSlice2Uint8Observable(parent, func(Uint8Observer) MappingByteSlice2Uint8Func {
+		return mapper
+	})
+}
+
+func MapByteSlice2Uint8ObserveNext(parent ByteSliceObservable, mapper func([]byte) uint8) Uint8Observable {
+	return MapByteSlice2Uint8Observable(parent, func(Uint8Observer) MappingByteSlice2Uint8Func {
+			return func(next []byte, err error, complete bool, observer Uint8Observer) {
+				var mapped uint8
+				if err == nil && !complete {
+					mapped = mapper(next)
+				}
+				PassthroughUint8(mapped, err, complete, observer)
+			}
+		},
+	)
+}
+
+type flatMapByteSlice2Uint8 struct {
+	parent ByteSliceObservable
+	mapper func ([]byte) Uint8Observable
+}
+
+func (f *flatMapByteSlice2Uint8) Subscribe(observer Uint8Observer) Subscription {
+	subscription := NewGenericSubscription()
+	wg := sync.WaitGroup{}
+	f.parent.Subscribe(ByteSliceObserverFunc(func (next []byte, err error, complete bool) {
+		switch {
+		case err != nil:
+			wg.Wait()
+			observer.Error(err)
+		case complete:
+			wg.Wait()
+			observer.Complete()
+		default:
+			wg.Add(1)
+			observable := f.mapper(next)
+			stream := (&Uint8Stream{observable}).
+				DoOnComplete(func() { wg.Done() }).
+				DoOnError(func(error) { wg.Done() })
+			stream = &Uint8Stream{ignoreCompletionFilter().Uint8(stream)}
+			stream.Subscribe(observer)
+		}
+	}))
+	return subscription
+}
+
+
+// MapUint8 maps this stream to an Uint8Stream via f.
+func (s *ByteSliceStream) MapUint8(f func ([]byte) uint8) *Uint8Stream {
+	return FromUint8Observable(MapByteSlice2Uint8ObserveNext(s, f))
+}
+
+func (s *ByteSliceStream) FlatMapUint8(f func ([]byte) Uint8Observable) *Uint8Stream {
+	return &Uint8Stream{&flatMapByteSlice2Uint8{s, f}}
+}
+
+
+
+type MappingByteSlice2Int8Func func(next []byte, err error, complete bool, observer Int8Observer)
+type MappingByteSlice2Int8FuncFactory func (observer Int8Observer) MappingByteSlice2Int8Func
+
+type MappingByteSlice2Int8Observable struct {
+	parent  ByteSliceObservable
+	mapper MappingByteSlice2Int8FuncFactory
+}
+
+func (f *MappingByteSlice2Int8Observable) Subscribe(observer Int8Observer) Subscription {
+	mapper := f.mapper(observer)
+	return f.parent.Subscribe(ByteSliceObserverFunc(func(next []byte, err error, complete bool) {
+		mapper(next, err, complete, observer)
+	}))
+}
+
+func MapByteSlice2Int8Observable(parent ByteSliceObservable, mapper MappingByteSlice2Int8FuncFactory) Int8Observable {
+	return &MappingByteSlice2Int8Observable{
+		parent:  parent,
+		mapper: mapper,
+	}
+}
+
+func MapByteSlice2Int8ObserveDirect(parent ByteSliceObservable, mapper MappingByteSlice2Int8Func) Int8Observable {
+	return MapByteSlice2Int8Observable(parent, func(Int8Observer) MappingByteSlice2Int8Func {
+		return mapper
+	})
+}
+
+func MapByteSlice2Int8ObserveNext(parent ByteSliceObservable, mapper func([]byte) int8) Int8Observable {
+	return MapByteSlice2Int8Observable(parent, func(Int8Observer) MappingByteSlice2Int8Func {
+			return func(next []byte, err error, complete bool, observer Int8Observer) {
+				var mapped int8
+				if err == nil && !complete {
+					mapped = mapper(next)
+				}
+				PassthroughInt8(mapped, err, complete, observer)
+			}
+		},
+	)
+}
+
+type flatMapByteSlice2Int8 struct {
+	parent ByteSliceObservable
+	mapper func ([]byte) Int8Observable
+}
+
+func (f *flatMapByteSlice2Int8) Subscribe(observer Int8Observer) Subscription {
+	subscription := NewGenericSubscription()
+	wg := sync.WaitGroup{}
+	f.parent.Subscribe(ByteSliceObserverFunc(func (next []byte, err error, complete bool) {
+		switch {
+		case err != nil:
+			wg.Wait()
+			observer.Error(err)
+		case complete:
+			wg.Wait()
+			observer.Complete()
+		default:
+			wg.Add(1)
+			observable := f.mapper(next)
+			stream := (&Int8Stream{observable}).
+				DoOnComplete(func() { wg.Done() }).
+				DoOnError(func(error) { wg.Done() })
+			stream = &Int8Stream{ignoreCompletionFilter().Int8(stream)}
+			stream.Subscribe(observer)
+		}
+	}))
+	return subscription
+}
+
+
+// MapInt8 maps this stream to an Int8Stream via f.
+func (s *ByteSliceStream) MapInt8(f func ([]byte) int8) *Int8Stream {
+	return FromInt8Observable(MapByteSlice2Int8ObserveNext(s, f))
+}
+
+func (s *ByteSliceStream) FlatMapInt8(f func ([]byte) Int8Observable) *Int8Stream {
+	return &Int8Stream{&flatMapByteSlice2Int8{s, f}}
+}
+
+
+
+type MappingByteSlice2Uint16Func func(next []byte, err error, complete bool, observer Uint16Observer)
+type MappingByteSlice2Uint16FuncFactory func (observer Uint16Observer) MappingByteSlice2Uint16Func
+
+type MappingByteSlice2Uint16Observable struct {
+	parent  ByteSliceObservable
+	mapper MappingByteSlice2Uint16FuncFactory
+}
+
+func (f *MappingByteSlice2Uint16Observable) Subscribe(observer Uint16Observer) Subscription {
+	mapper := f.mapper(observer)
+	return f.parent.Subscribe(ByteSliceObserverFunc(func(next []byte, err error, complete bool) {
+		mapper(next, err, complete, observer)
+	}))
+}
+
+func MapByteSlice2Uint16Observable(parent ByteSliceObservable, mapper MappingByteSlice2Uint16FuncFactory) Uint16Observable {
+	return &MappingByteSlice2Uint16Observable{
+		parent:  parent,
+		mapper: mapper,
+	}
+}
+
+func MapByteSlice2Uint16ObserveDirect(parent ByteSliceObservable, mapper MappingByteSlice2Uint16Func) Uint16Observable {
+	return MapByteSlice2Uint16Observable(parent, func(Uint16Observer) MappingByteSlice2Uint16Func {
+		return mapper
+	})
+}
+
+func MapByteSlice2Uint16ObserveNext(parent ByteSliceObservable, mapper func([]byte) uint16) Uint16Observable {
+	return MapByteSlice2Uint16Observable(parent, func(Uint16Observer) MappingByteSlice2Uint16Func {
+			return func(next []byte, err error, complete bool, observer Uint16Observer) {
+				var mapped uint16
+				if err == nil && !complete {
+					mapped = mapper(next)
+				}
+				PassthroughUint16(mapped, err, complete, observer)
+			}
+		},
+	)
+}
+
+type flatMapByteSlice2Uint16 struct {
+	parent ByteSliceObservable
+	mapper func ([]byte) Uint16Observable
+}
+
+func (f *flatMapByteSlice2Uint16) Subscribe(observer Uint16Observer) Subscription {
+	subscription := NewGenericSubscription()
+	wg := sync.WaitGroup{}
+	f.parent.Subscribe(ByteSliceObserverFunc(func (next []byte, err error, complete bool) {
+		switch {
+		case err != nil:
+			wg.Wait()
+			observer.Error(err)
+		case complete:
+			wg.Wait()
+			observer.Complete()
+		default:
+			wg.Add(1)
+			observable := f.mapper(next)
+			stream := (&Uint16Stream{observable}).
+				DoOnComplete(func() { wg.Done() }).
+				DoOnError(func(error) { wg.Done() })
+			stream = &Uint16Stream{ignoreCompletionFilter().Uint16(stream)}
+			stream.Subscribe(observer)
+		}
+	}))
+	return subscription
+}
+
+
+// MapUint16 maps this stream to an Uint16Stream via f.
+func (s *ByteSliceStream) MapUint16(f func ([]byte) uint16) *Uint16Stream {
+	return FromUint16Observable(MapByteSlice2Uint16ObserveNext(s, f))
+}
+
+func (s *ByteSliceStream) FlatMapUint16(f func ([]byte) Uint16Observable) *Uint16Stream {
+	return &Uint16Stream{&flatMapByteSlice2Uint16{s, f}}
+}
+
+
+
+type MappingByteSlice2Int16Func func(next []byte, err error, complete bool, observer Int16Observer)
+type MappingByteSlice2Int16FuncFactory func (observer Int16Observer) MappingByteSlice2Int16Func
+
+type MappingByteSlice2Int16Observable struct {
+	parent  ByteSliceObservable
+	mapper MappingByteSlice2Int16FuncFactory
+}
+
+func (f *MappingByteSlice2Int16Observable) Subscribe(observer Int16Observer) Subscription {
+	mapper := f.mapper(observer)
+	return f.parent.Subscribe(ByteSliceObserverFunc(func(next []byte, err error, complete bool) {
+		mapper(next, err, complete, observer)
+	}))
+}
+
+func MapByteSlice2Int16Observable(parent ByteSliceObservable, mapper MappingByteSlice2Int16FuncFactory) Int16Observable {
+	return &MappingByteSlice2Int16Observable{
+		parent:  parent,
+		mapper: mapper,
+	}
+}
+
+func MapByteSlice2Int16ObserveDirect(parent ByteSliceObservable, mapper MappingByteSlice2Int16Func) Int16Observable {
+	return MapByteSlice2Int16Observable(parent, func(Int16Observer) MappingByteSlice2Int16Func {
+		return mapper
+	})
+}
+
+func MapByteSlice2Int16ObserveNext(parent ByteSliceObservable, mapper func([]byte) int16) Int16Observable {
+	return MapByteSlice2Int16Observable(parent, func(Int16Observer) MappingByteSlice2Int16Func {
+			return func(next []byte, err error, complete bool, observer Int16Observer) {
+				var mapped int16
+				if err == nil && !complete {
+					mapped = mapper(next)
+				}
+				PassthroughInt16(mapped, err, complete, observer)
+			}
+		},
+	)
+}
+
+type flatMapByteSlice2Int16 struct {
+	parent ByteSliceObservable
+	mapper func ([]byte) Int16Observable
+}
+
+func (f *flatMapByteSlice2Int16) Subscribe(observer Int16Observer) Subscription {
+	subscription := NewGenericSubscription()
+	wg := sync.WaitGroup{}
+	f.parent.Subscribe(ByteSliceObserverFunc(func (next []byte, err error, complete bool) {
+		switch {
+		case err != nil:
+			wg.Wait()
+			observer.Error(err)
+		case complete:
+			wg.Wait()
+			observer.Complete()
+		default:
+			wg.Add(1)
+			observable := f.mapper(next)
+			stream := (&Int16Stream{observable}).
+				DoOnComplete(func() { wg.Done() }).
+				DoOnError(func(error) { wg.Done() })
+			stream = &Int16Stream{ignoreCompletionFilter().Int16(stream)}
+			stream.Subscribe(observer)
+		}
+	}))
+	return subscription
+}
+
+
+// MapInt16 maps this stream to an Int16Stream via f.
+func (s *ByteSliceStream) MapInt16(f func ([]byte) int16) *Int16Stream {
+	return FromInt16Observable(MapByteSlice2Int16ObserveNext(s, f))
+}
+
+func (s *ByteSliceStream) FlatMapInt16(f func ([]byte) Int16Observable) *Int16Stream {
+	return &Int16Stream{&flatMapByteSlice2Int16{s, f}}
+}
+
+
+
+type MappingByteSlice2Uint32Func func(next []byte, err error, complete bool, observer Uint32Observer)
+type MappingByteSlice2Uint32FuncFactory func (observer Uint32Observer) MappingByteSlice2Uint32Func
+
+type MappingByteSlice2Uint32Observable struct {
+	parent  ByteSliceObservable
+	mapper MappingByteSlice2Uint32FuncFactory
+}
+
+func (f *MappingByteSlice2Uint32Observable) Subscribe(observer Uint32Observer) Subscription {
+	mapper := f.mapper(observer)
+	return f.parent.Subscribe(ByteSliceObserverFunc(func(next []byte, err error, complete bool) {
+		mapper(next, err, complete, observer)
+	}))
+}
+
+func MapByteSlice2Uint32Observable(parent ByteSliceObservable, mapper MappingByteSlice2Uint32FuncFactory) Uint32Observable {
+	return &MappingByteSlice2Uint32Observable{
+		parent:  parent,
+		mapper: mapper,
+	}
+}
+
+func MapByteSlice2Uint32ObserveDirect(parent ByteSliceObservable, mapper MappingByteSlice2Uint32Func) Uint32Observable {
+	return MapByteSlice2Uint32Observable(parent, func(Uint32Observer) MappingByteSlice2Uint32Func {
+		return mapper
+	})
+}
+
+func MapByteSlice2Uint32ObserveNext(parent ByteSliceObservable, mapper func([]byte) uint32) Uint32Observable {
+	return MapByteSlice2Uint32Observable(parent, func(Uint32Observer) MappingByteSlice2Uint32Func {
+			return func(next []byte, err error, complete bool, observer Uint32Observer) {
+				var mapped uint32
+				if err == nil && !complete {
+					mapped = mapper(next)
+				}
+				PassthroughUint32(mapped, err, complete, observer)
+			}
+		},
+	)
+}
+
+type flatMapByteSlice2Uint32 struct {
+	parent ByteSliceObservable
+	mapper func ([]byte) Uint32Observable
+}
+
+func (f *flatMapByteSlice2Uint32) Subscribe(observer Uint32Observer) Subscription {
+	subscription := NewGenericSubscription()
+	wg := sync.WaitGroup{}
+	f.parent.Subscribe(ByteSliceObserverFunc(func (next []byte, err error, complete bool) {
+		switch {
+		case err != nil:
+			wg.Wait()
+			observer.Error(err)
+		case complete:
+			wg.Wait()
+			observer.Complete()
+		default:
+			wg.Add(1)
+			observable := f.mapper(next)
+			stream := (&Uint32Stream{observable}).
+				DoOnComplete(func() { wg.Done() }).
+				DoOnError(func(error) { wg.Done() })
+			stream = &Uint32Stream{ignoreCompletionFilter().Uint32(stream)}
+			stream.Subscribe(observer)
+		}
+	}))
+	return subscription
+}
+
+
+// MapUint32 maps this stream to an Uint32Stream via f.
+func (s *ByteSliceStream) MapUint32(f func ([]byte) uint32) *Uint32Stream {
+	return FromUint32Observable(MapByteSlice2Uint32ObserveNext(s, f))
+}
+
+func (s *ByteSliceStream) FlatMapUint32(f func ([]byte) Uint32Observable) *Uint32Stream {
+	return &Uint32Stream{&flatMapByteSlice2Uint32{s, f}}
+}
+
+
+
+type MappingByteSlice2Int32Func func(next []byte, err error, complete bool, observer Int32Observer)
+type MappingByteSlice2Int32FuncFactory func (observer Int32Observer) MappingByteSlice2Int32Func
+
+type MappingByteSlice2Int32Observable struct {
+	parent  ByteSliceObservable
+	mapper MappingByteSlice2Int32FuncFactory
+}
+
+func (f *MappingByteSlice2Int32Observable) Subscribe(observer Int32Observer) Subscription {
+	mapper := f.mapper(observer)
+	return f.parent.Subscribe(ByteSliceObserverFunc(func(next []byte, err error, complete bool) {
+		mapper(next, err, complete, observer)
+	}))
+}
+
+func MapByteSlice2Int32Observable(parent ByteSliceObservable, mapper MappingByteSlice2Int32FuncFactory) Int32Observable {
+	return &MappingByteSlice2Int32Observable{
+		parent:  parent,
+		mapper: mapper,
+	}
+}
+
+func MapByteSlice2Int32ObserveDirect(parent ByteSliceObservable, mapper MappingByteSlice2Int32Func) Int32Observable {
+	return MapByteSlice2Int32Observable(parent, func(Int32Observer) MappingByteSlice2Int32Func {
+		return mapper
+	})
+}
+
+func MapByteSlice2Int32ObserveNext(parent ByteSliceObservable, mapper func([]byte) int32) Int32Observable {
+	return MapByteSlice2Int32Observable(parent, func(Int32Observer) MappingByteSlice2Int32Func {
+			return func(next []byte, err error, complete bool, observer Int32Observer) {
+				var mapped int32
+				if err == nil && !complete {
+					mapped = mapper(next)
+				}
+				PassthroughInt32(mapped, err, complete, observer)
+			}
+		},
+	)
+}
+
+type flatMapByteSlice2Int32 struct {
+	parent ByteSliceObservable
+	mapper func ([]byte) Int32Observable
+}
+
+func (f *flatMapByteSlice2Int32) Subscribe(observer Int32Observer) Subscription {
+	subscription := NewGenericSubscription()
+	wg := sync.WaitGroup{}
+	f.parent.Subscribe(ByteSliceObserverFunc(func (next []byte, err error, complete bool) {
+		switch {
+		case err != nil:
+			wg.Wait()
+			observer.Error(err)
+		case complete:
+			wg.Wait()
+			observer.Complete()
+		default:
+			wg.Add(1)
+			observable := f.mapper(next)
+			stream := (&Int32Stream{observable}).
+				DoOnComplete(func() { wg.Done() }).
+				DoOnError(func(error) { wg.Done() })
+			stream = &Int32Stream{ignoreCompletionFilter().Int32(stream)}
+			stream.Subscribe(observer)
+		}
+	}))
+	return subscription
+}
+
+
+// MapInt32 maps this stream to an Int32Stream via f.
+func (s *ByteSliceStream) MapInt32(f func ([]byte) int32) *Int32Stream {
+	return FromInt32Observable(MapByteSlice2Int32ObserveNext(s, f))
+}
+
+func (s *ByteSliceStream) FlatMapInt32(f func ([]byte) Int32Observable) *Int32Stream {
+	return &Int32Stream{&flatMapByteSlice2Int32{s, f}}
+}
+
+
+
+type MappingByteSlice2Uint64Func func(next []byte, err error, complete bool, observer Uint64Observer)
+type MappingByteSlice2Uint64FuncFactory func (observer Uint64Observer) MappingByteSlice2Uint64Func
+
+type MappingByteSlice2Uint64Observable struct {
+	parent  ByteSliceObservable
+	mapper MappingByteSlice2Uint64FuncFactory
+}
+
+func (f *MappingByteSlice2Uint64Observable) Subscribe(observer Uint64Observer) Subscription {
+	mapper := f.mapper(observer)
+	return f.parent.Subscribe(ByteSliceObserverFunc(func(next []byte, err error, complete bool) {
+		mapper(next, err, complete, observer)
+	}))
+}
+
+func MapByteSlice2Uint64Observable(parent ByteSliceObservable, mapper MappingByteSlice2Uint64FuncFactory) Uint64Observable {
+	return &MappingByteSlice2Uint64Observable{
+		parent:  parent,
+		mapper: mapper,
+	}
+}
+
+func MapByteSlice2Uint64ObserveDirect(parent ByteSliceObservable, mapper MappingByteSlice2Uint64Func) Uint64Observable {
+	return MapByteSlice2Uint64Observable(parent, func(Uint64Observer) MappingByteSlice2Uint64Func {
+		return mapper
+	})
+}
+
+func MapByteSlice2Uint64ObserveNext(parent ByteSliceObservable, mapper func([]byte) uint64) Uint64Observable {
+	return MapByteSlice2Uint64Observable(parent, func(Uint64Observer) MappingByteSlice2Uint64Func {
+			return func(next []byte, err error, complete bool, observer Uint64Observer) {
+				var mapped uint64
+				if err == nil && !complete {
+					mapped = mapper(next)
+				}
+				PassthroughUint64(mapped, err, complete, observer)
+			}
+		},
+	)
+}
+
+type flatMapByteSlice2Uint64 struct {
+	parent ByteSliceObservable
+	mapper func ([]byte) Uint64Observable
+}
+
+func (f *flatMapByteSlice2Uint64) Subscribe(observer Uint64Observer) Subscription {
+	subscription := NewGenericSubscription()
+	wg := sync.WaitGroup{}
+	f.parent.Subscribe(ByteSliceObserverFunc(func (next []byte, err error, complete bool) {
+		switch {
+		case err != nil:
+			wg.Wait()
+			observer.Error(err)
+		case complete:
+			wg.Wait()
+			observer.Complete()
+		default:
+			wg.Add(1)
+			observable := f.mapper(next)
+			stream := (&Uint64Stream{observable}).
+				DoOnComplete(func() { wg.Done() }).
+				DoOnError(func(error) { wg.Done() })
+			stream = &Uint64Stream{ignoreCompletionFilter().Uint64(stream)}
+			stream.Subscribe(observer)
+		}
+	}))
+	return subscription
+}
+
+
+// MapUint64 maps this stream to an Uint64Stream via f.
+func (s *ByteSliceStream) MapUint64(f func ([]byte) uint64) *Uint64Stream {
+	return FromUint64Observable(MapByteSlice2Uint64ObserveNext(s, f))
+}
+
+func (s *ByteSliceStream) FlatMapUint64(f func ([]byte) Uint64Observable) *Uint64Stream {
+	return &Uint64Stream{&flatMapByteSlice2Uint64{s, f}}
+}
+
+
+
+type MappingByteSlice2Int64Func func(next []byte, err error, complete bool, observer Int64Observer)
+type MappingByteSlice2Int64FuncFactory func (observer Int64Observer) MappingByteSlice2Int64Func
+
+type MappingByteSlice2Int64Observable struct {
+	parent  ByteSliceObservable
+	mapper MappingByteSlice2Int64FuncFactory
+}
+
+func (f *MappingByteSlice2Int64Observable) Subscribe(observer Int64Observer) Subscription {
+	mapper := f.mapper(observer)
+	return f.parent.Subscribe(ByteSliceObserverFunc(func(next []byte, err error, complete bool) {
+		mapper(next, err, complete, observer)
+	}))
+}
+
+func MapByteSlice2Int64Observable(parent ByteSliceObservable, mapper MappingByteSlice2Int64FuncFactory) Int64Observable {
+	return &MappingByteSlice2Int64Observable{
+		parent:  parent,
+		mapper: mapper,
+	}
+}
+
+func MapByteSlice2Int64ObserveDirect(parent ByteSliceObservable, mapper MappingByteSlice2Int64Func) Int64Observable {
+	return MapByteSlice2Int64Observable(parent, func(Int64Observer) MappingByteSlice2Int64Func {
+		return mapper
+	})
+}
+
+func MapByteSlice2Int64ObserveNext(parent ByteSliceObservable, mapper func([]byte) int64) Int64Observable {
+	return MapByteSlice2Int64Observable(parent, func(Int64Observer) MappingByteSlice2Int64Func {
+			return func(next []byte, err error, complete bool, observer Int64Observer) {
+				var mapped int64
+				if err == nil && !complete {
+					mapped = mapper(next)
+				}
+				PassthroughInt64(mapped, err, complete, observer)
+			}
+		},
+	)
+}
+
+type flatMapByteSlice2Int64 struct {
+	parent ByteSliceObservable
+	mapper func ([]byte) Int64Observable
+}
+
+func (f *flatMapByteSlice2Int64) Subscribe(observer Int64Observer) Subscription {
+	subscription := NewGenericSubscription()
+	wg := sync.WaitGroup{}
+	f.parent.Subscribe(ByteSliceObserverFunc(func (next []byte, err error, complete bool) {
+		switch {
+		case err != nil:
+			wg.Wait()
+			observer.Error(err)
+		case complete:
+			wg.Wait()
+			observer.Complete()
+		default:
+			wg.Add(1)
+			observable := f.mapper(next)
+			stream := (&Int64Stream{observable}).
+				DoOnComplete(func() { wg.Done() }).
+				DoOnError(func(error) { wg.Done() })
+			stream = &Int64Stream{ignoreCompletionFilter().Int64(stream)}
+			stream.Subscribe(observer)
+		}
+	}))
+	return subscription
+}
+
+
+// MapInt64 maps this stream to an Int64Stream via f.
+func (s *ByteSliceStream) MapInt64(f func ([]byte) int64) *Int64Stream {
+	return FromInt64Observable(MapByteSlice2Int64ObserveNext(s, f))
+}
+
+func (s *ByteSliceStream) FlatMapInt64(f func ([]byte) Int64Observable) *Int64Stream {
+	return &Int64Stream{&flatMapByteSlice2Int64{s, f}}
+}
+
+
+
+type MappingByteSlice2Float32Func func(next []byte, err error, complete bool, observer Float32Observer)
+type MappingByteSlice2Float32FuncFactory func (observer Float32Observer) MappingByteSlice2Float32Func
+
+type MappingByteSlice2Float32Observable struct {
+	parent  ByteSliceObservable
+	mapper MappingByteSlice2Float32FuncFactory
+}
+
+func (f *MappingByteSlice2Float32Observable) Subscribe(observer Float32Observer) Subscription {
+	mapper := f.mapper(observer)
+	return f.parent.Subscribe(ByteSliceObserverFunc(func(next []byte, err error, complete bool) {
+		mapper(next, err, complete, observer)
+	}))
+}
+
+func MapByteSlice2Float32Observable(parent ByteSliceObservable, mapper MappingByteSlice2Float32FuncFactory) Float32Observable {
+	return &MappingByteSlice2Float32Observable{
+		parent:  parent,
+		mapper: mapper,
+	}
+}
+
+func MapByteSlice2Float32ObserveDirect(parent ByteSliceObservable, mapper MappingByteSlice2Float32Func) Float32Observable {
+	return MapByteSlice2Float32Observable(parent, func(Float32Observer) MappingByteSlice2Float32Func {
+		return mapper
+	})
+}
+
+func MapByteSlice2Float32ObserveNext(parent ByteSliceObservable, mapper func([]byte) float32) Float32Observable {
+	return MapByteSlice2Float32Observable(parent, func(Float32Observer) MappingByteSlice2Float32Func {
+			return func(next []byte, err error, complete bool, observer Float32Observer) {
+				var mapped float32
+				if err == nil && !complete {
+					mapped = mapper(next)
+				}
+				PassthroughFloat32(mapped, err, complete, observer)
+			}
+		},
+	)
+}
+
+type flatMapByteSlice2Float32 struct {
+	parent ByteSliceObservable
+	mapper func ([]byte) Float32Observable
+}
+
+func (f *flatMapByteSlice2Float32) Subscribe(observer Float32Observer) Subscription {
+	subscription := NewGenericSubscription()
+	wg := sync.WaitGroup{}
+	f.parent.Subscribe(ByteSliceObserverFunc(func (next []byte, err error, complete bool) {
+		switch {
+		case err != nil:
+			wg.Wait()
+			observer.Error(err)
+		case complete:
+			wg.Wait()
+			observer.Complete()
+		default:
+			wg.Add(1)
+			observable := f.mapper(next)
+			stream := (&Float32Stream{observable}).
+				DoOnComplete(func() { wg.Done() }).
+				DoOnError(func(error) { wg.Done() })
+			stream = &Float32Stream{ignoreCompletionFilter().Float32(stream)}
+			stream.Subscribe(observer)
+		}
+	}))
+	return subscription
+}
+
+
+// MapFloat32 maps this stream to an Float32Stream via f.
+func (s *ByteSliceStream) MapFloat32(f func ([]byte) float32) *Float32Stream {
+	return FromFloat32Observable(MapByteSlice2Float32ObserveNext(s, f))
+}
+
+func (s *ByteSliceStream) FlatMapFloat32(f func ([]byte) Float32Observable) *Float32Stream {
+	return &Float32Stream{&flatMapByteSlice2Float32{s, f}}
+}
+
+
+
+type MappingByteSlice2Float64Func func(next []byte, err error, complete bool, observer Float64Observer)
+type MappingByteSlice2Float64FuncFactory func (observer Float64Observer) MappingByteSlice2Float64Func
+
+type MappingByteSlice2Float64Observable struct {
+	parent  ByteSliceObservable
+	mapper MappingByteSlice2Float64FuncFactory
+}
+
+func (f *MappingByteSlice2Float64Observable) Subscribe(observer Float64Observer) Subscription {
+	mapper := f.mapper(observer)
+	return f.parent.Subscribe(ByteSliceObserverFunc(func(next []byte, err error, complete bool) {
+		mapper(next, err, complete, observer)
+	}))
+}
+
+func MapByteSlice2Float64Observable(parent ByteSliceObservable, mapper MappingByteSlice2Float64FuncFactory) Float64Observable {
+	return &MappingByteSlice2Float64Observable{
+		parent:  parent,
+		mapper: mapper,
+	}
+}
+
+func MapByteSlice2Float64ObserveDirect(parent ByteSliceObservable, mapper MappingByteSlice2Float64Func) Float64Observable {
+	return MapByteSlice2Float64Observable(parent, func(Float64Observer) MappingByteSlice2Float64Func {
+		return mapper
+	})
+}
+
+func MapByteSlice2Float64ObserveNext(parent ByteSliceObservable, mapper func([]byte) float64) Float64Observable {
+	return MapByteSlice2Float64Observable(parent, func(Float64Observer) MappingByteSlice2Float64Func {
+			return func(next []byte, err error, complete bool, observer Float64Observer) {
+				var mapped float64
+				if err == nil && !complete {
+					mapped = mapper(next)
+				}
+				PassthroughFloat64(mapped, err, complete, observer)
+			}
+		},
+	)
+}
+
+type flatMapByteSlice2Float64 struct {
+	parent ByteSliceObservable
+	mapper func ([]byte) Float64Observable
+}
+
+func (f *flatMapByteSlice2Float64) Subscribe(observer Float64Observer) Subscription {
+	subscription := NewGenericSubscription()
+	wg := sync.WaitGroup{}
+	f.parent.Subscribe(ByteSliceObserverFunc(func (next []byte, err error, complete bool) {
+		switch {
+		case err != nil:
+			wg.Wait()
+			observer.Error(err)
+		case complete:
+			wg.Wait()
+			observer.Complete()
+		default:
+			wg.Add(1)
+			observable := f.mapper(next)
+			stream := (&Float64Stream{observable}).
+				DoOnComplete(func() { wg.Done() }).
+				DoOnError(func(error) { wg.Done() })
+			stream = &Float64Stream{ignoreCompletionFilter().Float64(stream)}
+			stream.Subscribe(observer)
+		}
+	}))
+	return subscription
+}
+
+
+// MapFloat64 maps this stream to an Float64Stream via f.
+func (s *ByteSliceStream) MapFloat64(f func ([]byte) float64) *Float64Stream {
+	return FromFloat64Observable(MapByteSlice2Float64ObserveNext(s, f))
+}
+
+func (s *ByteSliceStream) FlatMapFloat64(f func ([]byte) Float64Observable) *Float64Stream {
+	return &Float64Stream{&flatMapByteSlice2Float64{s, f}}
+}
+
+
+
+type MappingByteSlice2Complex64Func func(next []byte, err error, complete bool, observer Complex64Observer)
+type MappingByteSlice2Complex64FuncFactory func (observer Complex64Observer) MappingByteSlice2Complex64Func
+
+type MappingByteSlice2Complex64Observable struct {
+	parent  ByteSliceObservable
+	mapper MappingByteSlice2Complex64FuncFactory
+}
+
+func (f *MappingByteSlice2Complex64Observable) Subscribe(observer Complex64Observer) Subscription {
+	mapper := f.mapper(observer)
+	return f.parent.Subscribe(ByteSliceObserverFunc(func(next []byte, err error, complete bool) {
+		mapper(next, err, complete, observer)
+	}))
+}
+
+func MapByteSlice2Complex64Observable(parent ByteSliceObservable, mapper MappingByteSlice2Complex64FuncFactory) Complex64Observable {
+	return &MappingByteSlice2Complex64Observable{
+		parent:  parent,
+		mapper: mapper,
+	}
+}
+
+func MapByteSlice2Complex64ObserveDirect(parent ByteSliceObservable, mapper MappingByteSlice2Complex64Func) Complex64Observable {
+	return MapByteSlice2Complex64Observable(parent, func(Complex64Observer) MappingByteSlice2Complex64Func {
+		return mapper
+	})
+}
+
+func MapByteSlice2Complex64ObserveNext(parent ByteSliceObservable, mapper func([]byte) complex64) Complex64Observable {
+	return MapByteSlice2Complex64Observable(parent, func(Complex64Observer) MappingByteSlice2Complex64Func {
+			return func(next []byte, err error, complete bool, observer Complex64Observer) {
+				var mapped complex64
+				if err == nil && !complete {
+					mapped = mapper(next)
+				}
+				PassthroughComplex64(mapped, err, complete, observer)
+			}
+		},
+	)
+}
+
+type flatMapByteSlice2Complex64 struct {
+	parent ByteSliceObservable
+	mapper func ([]byte) Complex64Observable
+}
+
+func (f *flatMapByteSlice2Complex64) Subscribe(observer Complex64Observer) Subscription {
+	subscription := NewGenericSubscription()
+	wg := sync.WaitGroup{}
+	f.parent.Subscribe(ByteSliceObserverFunc(func (next []byte, err error, complete bool) {
+		switch {
+		case err != nil:
+			wg.Wait()
+			observer.Error(err)
+		case complete:
+			wg.Wait()
+			observer.Complete()
+		default:
+			wg.Add(1)
+			observable := f.mapper(next)
+			stream := (&Complex64Stream{observable}).
+				DoOnComplete(func() { wg.Done() }).
+				DoOnError(func(error) { wg.Done() })
+			stream = &Complex64Stream{ignoreCompletionFilter().Complex64(stream)}
+			stream.Subscribe(observer)
+		}
+	}))
+	return subscription
+}
+
+
+// MapComplex64 maps this stream to an Complex64Stream via f.
+func (s *ByteSliceStream) MapComplex64(f func ([]byte) complex64) *Complex64Stream {
+	return FromComplex64Observable(MapByteSlice2Complex64ObserveNext(s, f))
+}
+
+func (s *ByteSliceStream) FlatMapComplex64(f func ([]byte) Complex64Observable) *Complex64Stream {
+	return &Complex64Stream{&flatMapByteSlice2Complex64{s, f}}
+}
+
+
+
+type MappingByteSlice2Complex128Func func(next []byte, err error, complete bool, observer Complex128Observer)
+type MappingByteSlice2Complex128FuncFactory func (observer Complex128Observer) MappingByteSlice2Complex128Func
+
+type MappingByteSlice2Complex128Observable struct {
+	parent  ByteSliceObservable
+	mapper MappingByteSlice2Complex128FuncFactory
+}
+
+func (f *MappingByteSlice2Complex128Observable) Subscribe(observer Complex128Observer) Subscription {
+	mapper := f.mapper(observer)
+	return f.parent.Subscribe(ByteSliceObserverFunc(func(next []byte, err error, complete bool) {
+		mapper(next, err, complete, observer)
+	}))
+}
+
+func MapByteSlice2Complex128Observable(parent ByteSliceObservable, mapper MappingByteSlice2Complex128FuncFactory) Complex128Observable {
+	return &MappingByteSlice2Complex128Observable{
+		parent:  parent,
+		mapper: mapper,
+	}
+}
+
+func MapByteSlice2Complex128ObserveDirect(parent ByteSliceObservable, mapper MappingByteSlice2Complex128Func) Complex128Observable {
+	return MapByteSlice2Complex128Observable(parent, func(Complex128Observer) MappingByteSlice2Complex128Func {
+		return mapper
+	})
+}
+
+func MapByteSlice2Complex128ObserveNext(parent ByteSliceObservable, mapper func([]byte) complex128) Complex128Observable {
+	return MapByteSlice2Complex128Observable(parent, func(Complex128Observer) MappingByteSlice2Complex128Func {
+			return func(next []byte, err error, complete bool, observer Complex128Observer) {
+				var mapped complex128
+				if err == nil && !complete {
+					mapped = mapper(next)
+				}
+				PassthroughComplex128(mapped, err, complete, observer)
+			}
+		},
+	)
+}
+
+type flatMapByteSlice2Complex128 struct {
+	parent ByteSliceObservable
+	mapper func ([]byte) Complex128Observable
+}
+
+func (f *flatMapByteSlice2Complex128) Subscribe(observer Complex128Observer) Subscription {
+	subscription := NewGenericSubscription()
+	wg := sync.WaitGroup{}
+	f.parent.Subscribe(ByteSliceObserverFunc(func (next []byte, err error, complete bool) {
+		switch {
+		case err != nil:
+			wg.Wait()
+			observer.Error(err)
+		case complete:
+			wg.Wait()
+			observer.Complete()
+		default:
+			wg.Add(1)
+			observable := f.mapper(next)
+			stream := (&Complex128Stream{observable}).
+				DoOnComplete(func() { wg.Done() }).
+				DoOnError(func(error) { wg.Done() })
+			stream = &Complex128Stream{ignoreCompletionFilter().Complex128(stream)}
+			stream.Subscribe(observer)
+		}
+	}))
+	return subscription
+}
+
+
+// MapComplex128 maps this stream to an Complex128Stream via f.
+func (s *ByteSliceStream) MapComplex128(f func ([]byte) complex128) *Complex128Stream {
+	return FromComplex128Observable(MapByteSlice2Complex128ObserveNext(s, f))
+}
+
+func (s *ByteSliceStream) FlatMapComplex128(f func ([]byte) Complex128Observable) *Complex128Stream {
+	return &Complex128Stream{&flatMapByteSlice2Complex128{s, f}}
+}
+
+
+
+type MappingByteSlice2TimeFunc func(next []byte, err error, complete bool, observer TimeObserver)
+type MappingByteSlice2TimeFuncFactory func (observer TimeObserver) MappingByteSlice2TimeFunc
+
+type MappingByteSlice2TimeObservable struct {
+	parent  ByteSliceObservable
+	mapper MappingByteSlice2TimeFuncFactory
+}
+
+func (f *MappingByteSlice2TimeObservable) Subscribe(observer TimeObserver) Subscription {
+	mapper := f.mapper(observer)
+	return f.parent.Subscribe(ByteSliceObserverFunc(func(next []byte, err error, complete bool) {
+		mapper(next, err, complete, observer)
+	}))
+}
+
+func MapByteSlice2TimeObservable(parent ByteSliceObservable, mapper MappingByteSlice2TimeFuncFactory) TimeObservable {
+	return &MappingByteSlice2TimeObservable{
+		parent:  parent,
+		mapper: mapper,
+	}
+}
+
+func MapByteSlice2TimeObserveDirect(parent ByteSliceObservable, mapper MappingByteSlice2TimeFunc) TimeObservable {
+	return MapByteSlice2TimeObservable(parent, func(TimeObserver) MappingByteSlice2TimeFunc {
+		return mapper
+	})
+}
+
+func MapByteSlice2TimeObserveNext(parent ByteSliceObservable, mapper func([]byte) time.Time) TimeObservable {
+	return MapByteSlice2TimeObservable(parent, func(TimeObserver) MappingByteSlice2TimeFunc {
+			return func(next []byte, err error, complete bool, observer TimeObserver) {
+				var mapped time.Time
+				if err == nil && !complete {
+					mapped = mapper(next)
+				}
+				PassthroughTime(mapped, err, complete, observer)
+			}
+		},
+	)
+}
+
+type flatMapByteSlice2Time struct {
+	parent ByteSliceObservable
+	mapper func ([]byte) TimeObservable
+}
+
+func (f *flatMapByteSlice2Time) Subscribe(observer TimeObserver) Subscription {
+	subscription := NewGenericSubscription()
+	wg := sync.WaitGroup{}
+	f.parent.Subscribe(ByteSliceObserverFunc(func (next []byte, err error, complete bool) {
+		switch {
+		case err != nil:
+			wg.Wait()
+			observer.Error(err)
+		case complete:
+			wg.Wait()
+			observer.Complete()
+		default:
+			wg.Add(1)
+			observable := f.mapper(next)
+			stream := (&TimeStream{observable}).
+				DoOnComplete(func() { wg.Done() }).
+				DoOnError(func(error) { wg.Done() })
+			stream = &TimeStream{ignoreCompletionFilter().Time(stream)}
+			stream.Subscribe(observer)
+		}
+	}))
+	return subscription
+}
+
+
+// MapTime maps this stream to an TimeStream via f.
+func (s *ByteSliceStream) MapTime(f func ([]byte) time.Time) *TimeStream {
+	return FromTimeObservable(MapByteSlice2TimeObserveNext(s, f))
+}
+
+func (s *ByteSliceStream) FlatMapTime(f func ([]byte) TimeObservable) *TimeStream {
+	return &TimeStream{&flatMapByteSlice2Time{s, f}}
+}
+
+
+
+type MappingByteSlice2DurationFunc func(next []byte, err error, complete bool, observer DurationObserver)
+type MappingByteSlice2DurationFuncFactory func (observer DurationObserver) MappingByteSlice2DurationFunc
+
+type MappingByteSlice2DurationObservable struct {
+	parent  ByteSliceObservable
+	mapper MappingByteSlice2DurationFuncFactory
+}
+
+func (f *MappingByteSlice2DurationObservable) Subscribe(observer DurationObserver) Subscription {
+	mapper := f.mapper(observer)
+	return f.parent.Subscribe(ByteSliceObserverFunc(func(next []byte, err error, complete bool) {
+		mapper(next, err, complete, observer)
+	}))
+}
+
+func MapByteSlice2DurationObservable(parent ByteSliceObservable, mapper MappingByteSlice2DurationFuncFactory) DurationObservable {
+	return &MappingByteSlice2DurationObservable{
+		parent:  parent,
+		mapper: mapper,
+	}
+}
+
+func MapByteSlice2DurationObserveDirect(parent ByteSliceObservable, mapper MappingByteSlice2DurationFunc) DurationObservable {
+	return MapByteSlice2DurationObservable(parent, func(DurationObserver) MappingByteSlice2DurationFunc {
+		return mapper
+	})
+}
+
+func MapByteSlice2DurationObserveNext(parent ByteSliceObservable, mapper func([]byte) time.Duration) DurationObservable {
+	return MapByteSlice2DurationObservable(parent, func(DurationObserver) MappingByteSlice2DurationFunc {
+			return func(next []byte, err error, complete bool, observer DurationObserver) {
+				var mapped time.Duration
+				if err == nil && !complete {
+					mapped = mapper(next)
+				}
+				PassthroughDuration(mapped, err, complete, observer)
+			}
+		},
+	)
+}
+
+type flatMapByteSlice2Duration struct {
+	parent ByteSliceObservable
+	mapper func ([]byte) DurationObservable
+}
+
+func (f *flatMapByteSlice2Duration) Subscribe(observer DurationObserver) Subscription {
+	subscription := NewGenericSubscription()
+	wg := sync.WaitGroup{}
+	f.parent.Subscribe(ByteSliceObserverFunc(func (next []byte, err error, complete bool) {
+		switch {
+		case err != nil:
+			wg.Wait()
+			observer.Error(err)
+		case complete:
+			wg.Wait()
+			observer.Complete()
+		default:
+			wg.Add(1)
+			observable := f.mapper(next)
+			stream := (&DurationStream{observable}).
+				DoOnComplete(func() { wg.Done() }).
+				DoOnError(func(error) { wg.Done() })
+			stream = &DurationStream{ignoreCompletionFilter().Duration(stream)}
+			stream.Subscribe(observer)
+		}
+	}))
+	return subscription
+}
+
+
+// MapDuration maps this stream to an DurationStream via f.
+func (s *ByteSliceStream) MapDuration(f func ([]byte) time.Duration) *DurationStream {
+	return FromDurationObservable(MapByteSlice2DurationObserveNext(s, f))
+}
+
+func (s *ByteSliceStream) FlatMapDuration(f func ([]byte) DurationObservable) *DurationStream {
+	return &DurationStream{&flatMapByteSlice2Duration{s, f}}
+}
+
+
+
+type MappingByteSlice2ByteSliceFunc func(next []byte, err error, complete bool, observer ByteSliceObserver)
+type MappingByteSlice2ByteSliceFuncFactory func (observer ByteSliceObserver) MappingByteSlice2ByteSliceFunc
+
+type MappingByteSlice2ByteSliceObservable struct {
+	parent  ByteSliceObservable
+	mapper MappingByteSlice2ByteSliceFuncFactory
+}
+
+func (f *MappingByteSlice2ByteSliceObservable) Subscribe(observer ByteSliceObserver) Subscription {
+	mapper := f.mapper(observer)
+	return f.parent.Subscribe(ByteSliceObserverFunc(func(next []byte, err error, complete bool) {
+		mapper(next, err, complete, observer)
+	}))
+}
+
+func MapByteSlice2ByteSliceObservable(parent ByteSliceObservable, mapper MappingByteSlice2ByteSliceFuncFactory) ByteSliceObservable {
+	return &MappingByteSlice2ByteSliceObservable{
+		parent:  parent,
+		mapper: mapper,
+	}
+}
+
+func MapByteSlice2ByteSliceObserveDirect(parent ByteSliceObservable, mapper MappingByteSlice2ByteSliceFunc) ByteSliceObservable {
+	return MapByteSlice2ByteSliceObservable(parent, func(ByteSliceObserver) MappingByteSlice2ByteSliceFunc {
+		return mapper
+	})
+}
+
+func MapByteSlice2ByteSliceObserveNext(parent ByteSliceObservable, mapper func([]byte) []byte) ByteSliceObservable {
+	return MapByteSlice2ByteSliceObservable(parent, func(ByteSliceObserver) MappingByteSlice2ByteSliceFunc {
+			return func(next []byte, err error, complete bool, observer ByteSliceObserver) {
+				var mapped []byte
+				if err == nil && !complete {
+					mapped = mapper(next)
+				}
+				PassthroughByteSlice(mapped, err, complete, observer)
+			}
+		},
+	)
+}
+
+type flatMapByteSlice2ByteSlice struct {
+	parent ByteSliceObservable
+	mapper func ([]byte) ByteSliceObservable
+}
+
+func (f *flatMapByteSlice2ByteSlice) Subscribe(observer ByteSliceObserver) Subscription {
+	subscription := NewGenericSubscription()
+	wg := sync.WaitGroup{}
+	f.parent.Subscribe(ByteSliceObserverFunc(func (next []byte, err error, complete bool) {
+		switch {
+		case err != nil:
+			wg.Wait()
+			observer.Error(err)
+		case complete:
+			wg.Wait()
+			observer.Complete()
+		default:
+			wg.Add(1)
+			observable := f.mapper(next)
+			stream := (&ByteSliceStream{observable}).
+				DoOnComplete(func() { wg.Done() }).
+				DoOnError(func(error) { wg.Done() })
+			stream = &ByteSliceStream{ignoreCompletionFilter().ByteSlice(stream)}
+			stream.Subscribe(observer)
+		}
+	}))
+	return subscription
+}
+
+// Map maps values in this stream to another value.
+func (s *ByteSliceStream) Map(f func ([]byte) []byte) *ByteSliceStream {
+	return FromByteSliceObservable(MapByteSlice2ByteSliceObserveNext(s, f))
+}
+
+func (s *ByteSliceStream) FlatMap(f func ([]byte) ByteSliceObservable) *ByteSliceStream {
+	return &ByteSliceStream{&flatMapByteSlice2ByteSlice{s, f}}
 }
 
 

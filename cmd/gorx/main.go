@@ -17,7 +17,7 @@ import (
 
 var (
 	commonTypes = strings.Fields("int string float32 float64")
-	baseTypes   = strings.Fields("bool rune byte string uint int uint8 int8 uint16 int16 uint32 int32 uint64 int64 float32 float64 complex64 complex128 time.Time time.Duration")
+	baseTypes   = strings.Fields("bool rune byte string uint int uint8 int8 uint16 int16 uint32 int32 uint64 int64 float32 float64 complex64 complex128 time.Time time.Duration []byte")
 )
 
 var (
@@ -1514,10 +1514,12 @@ func typeName(t ast.Expr) []string {
 		// return append(typeName(n.X), typeName(n.Sel)...)
 		return typeName(n.Sel)
 	case *ast.MapType:
-		keys := append([]string{"Map"}, typeName(n.Key)...)
-		return append(keys, typeName(n.Value)...)
+		keys := typeName(n.Key)
+		keys = append(keys, typeName(n.Value)...)
+		keys = append(keys, "Map")
+		return keys
 	case *ast.ArrayType:
-		return append([]string{"Array"}, typeName(n.Elt)...)
+		return append(typeName(n.Elt), "Slice")
 	case *ast.Ident:
 		return []string{strings.Title(n.Name)}
 	default:
