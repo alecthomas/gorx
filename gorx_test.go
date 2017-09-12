@@ -9,7 +9,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/alecthomas/assert"
+	"github.com/stretchr/testify/assert"
 )
 
 func add(a, b int) int {
