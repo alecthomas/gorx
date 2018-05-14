@@ -9,19 +9,19 @@ import (
 	"net/http"
 	"time"
 
-	. "github.com/alecthomas/gorx/examples/complex/rx"
+	"github.com/alecthomas/gorx/examples/complex/rx"
 )
 
-func GetCached(url string) *ResponseStream {
+func GetCached(url string) *rx.ResponseStream {
 	fmt.Printf("No cache entry for %s\n", url)
-	return ThrowResponse(errors.New("not implemented"))
+	return rx.ThrowResponse(errors.New("not implemented"))
 }
 func SetCached(response *http.Response) {
 	fmt.Printf("Caching %s\n", response.Request.URL)
 }
 
-func Get(url string) *ResponseStream {
-	return CreateResponse(func(observer ResponseObserver, subscription Subscription) {
+func Get(url string) *rx.ResponseStream {
+	return rx.CreateResponse(func(observer rx.ResponseObserver, subscription rx.Subscription) {
 		response, err := http.Get(url)
 		if err != nil {
 			observer.Error(err)
@@ -43,28 +43,28 @@ func LogError(err error) {
 	fmt.Printf("error: %s\n", err)
 }
 
-func GetWikipediaArticles(timeout time.Duration, articles ...string) *ResponseStream {
+func GetWikipediaArticles(timeout time.Duration, articles ...string) *rx.ResponseStream {
 	// Try cached URL first, then recover with remote URL and
 	// finally recover with an empty stream.
-	return FromStringArray(articles).
+	return rx.FromStringArray(articles).
 		Map(URLForArticle).
-		FlatMapResponse(func(url string) ResponseObservable {
-		remote := Get(url).
-			Timeout(timeout).
-			Do(SetCached).
-			DoOnError(LogError).
-			Catch(EmptyResponse())
-		return GetCached(url).
-			Catch(remote)
-	})
+		FlatMapResponse(func(url string) rx.ResponseObservable {
+			remote := Get(url).
+				Timeout(timeout).
+				Do(SetCached).
+				DoOnError(LogError).
+				Catch(rx.EmptyResponse())
+			return GetCached(url).
+				Catch(remote)
+		})
 }
 
 func main() {
 	GetWikipediaArticles(time.Second*5, "MinHash", "Streaming_algorithm", "A MISSING PAGE", "ANOTHER MISSING PAGE").
 		Do(func(response *http.Response) {
-		defer response.Body.Close()
-		content, _ := ioutil.ReadAll(response.Body)
-		fmt.Printf("Retrieved %d bytes from %s\n", len(content), response.Request.URL)
-	}).
+			defer response.Body.Close()
+			content, _ := ioutil.ReadAll(response.Body)
+			fmt.Printf("Retrieved %d bytes from %s\n", len(content), response.Request.URL)
+		}).
 		Wait()
 }
